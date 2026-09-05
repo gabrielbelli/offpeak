@@ -49,7 +49,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 
-namespace AiVoice.Worker
+namespace IdleGpu
 {
     public class Policy
     {
@@ -104,7 +104,7 @@ namespace AiVoice.Worker
                 // Never yield to our own job: it is the thing we are deciding
                 // about, and counting its VRAM as evidence of a user would make the
                 // policy oscillate the moment a job allocated anything.
-                if (s.OwnJobPid > 0 && u.Pid == s.OwnJobPid) continue;
+                if (s.OwnJobPids != null && s.OwnJobPids.Contains(u.Pid)) continue;
                 bool allowed = false;
                 foreach (string a in _c.VramAllowlist)
                     if (string.Equals(a.Trim(), u.Name, StringComparison.OrdinalIgnoreCase)) { allowed = true; break; }
@@ -168,7 +168,9 @@ namespace AiVoice.Worker
                     // 2026-09-05: vgc Stopped/Manual, vgk Running/System. vgk is
                     // always running and is therefore worthless as a signal.
                     v.WantsGpu = true; v.IsVeto = true;
-                    v.Reasons.Add("Vanguard user-mode service vgc is running");
+                    v.Reasons.Add("anti-cheat service " +
+                        (string.IsNullOrEmpty(s.Launchers.AntiCheatService)
+                            ? "is running" : s.Launchers.AntiCheatService + " is running"));
                 }
                 if (s.Launchers.GameProcesses.Count > 0)
                 {

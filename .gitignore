@@ -9,12 +9,22 @@ dist/
 # vacuously, which is worse than having no tests at all.
 !tests/fixtures/*.csv
 
-# The provisioned runtime: ~8 GiB of torch, CUDA and weights. uv.lock is
-# committed; everything it installs is not.
-runtime/.venv/
-runtime/python/
-runtime/models/
-runtime/cache/
-runtime/uv.exe
-runtime/provision.status
+# What a service downloads: about 8 GiB of torch, CUDA and weights for speech
+# alone. uv.lock and pyproject.toml are committed; everything they install is
+# not. In a real install this lives in %LOCALAPPDATA%\idlegpu\runtime and never
+# in a checkout, but a provisioning script run by hand with -Root . would put it
+# here.
+runtime/
+services/*/venv/
+services/*/python/
+services/*/models/
+services/*/cache/
+services/*/bin/
+services/*/.installed
+services/*/uv.exe
+__pycache__/
+*.pyc
+
+# Queue directories, if anyone points one at a checkout.
 queue/
+queues/

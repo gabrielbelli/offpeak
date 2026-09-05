@@ -26,7 +26,7 @@ using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace AiVoice.Worker
+namespace IdleGpu
 {
     public class TrayApp : ApplicationContext
     {
@@ -200,7 +200,13 @@ namespace AiVoice.Worker
                 _icon.Text = Trim(tip, 62);
 
                 SetIcon(st, overriding, provisioning != null);
-                _agent.WriteState();
+                // state.json is NOT written here any more. It used to be, and this
+                // was its only caller, which meant a headless agent - --watch, an
+                // SSH session, --serve - published nothing at all. Publication now
+                // lives in the agent: FastLoop builds the document into a volatile
+                // string once per tick and SlowLoop writes it to disk, so the tray,
+                // the file and GET /v1/status can never disagree, and no disk write
+                // sits on the yield path.
             }
             catch (Exception) { }
         }

@@ -2,9 +2,9 @@
 #
 # WHY 3.12 AND NOT SOMETHING NEWER. chatterbox-tts 0.1.7 hard-pins torch==2.6.0
 # for python_version < "3.14". Python 3.14 would unlock torch>=2.9, but 3.14
-# removed pkg_resources, which resemble-perth imports - a problem this repo has
-# already hit and documented at services/tts-long/requirements.txt:30. So 3.12 is
-# the only version that overrides nobody's pin.
+# removed pkg_resources, which resemble-perth imports. So 3.12 is the only
+# version that overrides nobody's pin. See the setuptools pin below, which is the
+# same problem arriving from the other direction.
 #
 # WHY cu126. torch 2.6.0 exists as a Windows wheel in cu124 and cu126 only; there
 # is no 2.6.0+cu128 for Windows. cu126 is therefore forced, not chosen. Overriding
@@ -14,16 +14,42 @@
 # idleness question this proof of concept exists to answer has been answered.
 #
 # gradio and pre-commit are hard runtime dependencies of chatterbox-tts 0.1.7, not
-# extras. That is upstream's mistake and we inherit it, as services/tts-long
-# already does. About 40 MB out of 5,600 - not worth stripping now.
+# extras. That is upstream's mistake and we inherit it. About 40 MB out of 8,000
+# - not worth stripping now.
 
 [project]
-name = "ai-voice-worker-runtime"
+name = "idlegpu-chatterbox"
 version = "0.1.0"
 description = "Chatterbox on a GPU, as a child process that can be killed at any moment"
 requires-python = "==3.12.*"
 dependencies = [
     "chatterbox-tts==0.1.7",
+    # NOT A MISTAKE, AND NOT OPTIONAL. resemble-perth (a hard dependency of
+    # chatterbox-tts, used for the audio watermark) imports pkg_resources at
+    # module scope, and pkg_resources ships inside setuptools. uv creates virtual
+    # environments WITHOUT setuptools, unlike the venv module, so nothing pulls it
+    # in and the import fails.
+    #
+    # It fails SILENTLY, which is what makes it worth the comment. perth/__init__
+    # catches the ImportError and leaves perth.PerthImplicitWatermarker set to
+    # None, so the failure surfaces four frames away as
+    #   TypeError: 'NoneType' object is not callable
+    # inside chatterbox's own constructor, with nothing in the message pointing at
+    # setuptools. Measured on spring after a 6 GB install had otherwise succeeded,
+    # torch cu126 and all 3.2 GB of weights included.
+    #
+    # THE UPPER BOUND IS THE WHOLE POINT AND IT WAS ALSO MEASURED. An unpinned
+    # "setuptools>=68" resolved to 84.0.0, which no longer CONTAINS
+    # pkg_resources: it was deprecated through the 8x series and then removed.
+    # So the first attempt installed setuptools, changed nothing, and produced
+    # the identical 'NoneType' object is not callable four frames deep in
+    # chatterbox. <81 is the last series that still ships the module
+    # resemble-perth imports.
+    #
+    # This is upstream's bill, not ours: resemble-perth should not import a
+    # deprecated shim at module scope, and chatterbox-tts should not depend on a
+    # watermarker that does. Until one of them moves, the pin is the fix.
+    "setuptools>=68,<81",
     # torch and torchaudio are named here EXPLICITLY even though chatterbox-tts
     # already requires both. They have to be direct dependencies for the
     # [tool.uv.sources] mapping below to apply to them: uv only honours a source

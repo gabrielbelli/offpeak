@@ -51,7 +51,7 @@ FIX = os.path.join(HERE, "fixtures")
 COLS = ("iso_time,state,util_gpu,util_mem,enc,dec,mem_clk_mhz,sm_clk_mhz,pstate,power_w,"
         "mem_used_mib,eng_3d,eng_decode,eng_encode,gpu_healthy,counters_fresh,"
         "own_session,console_session,locked,input_idle_s,fullscreen,fg_process,"
-        "steam_appid,steam_appname,vgc,game_procs,vram_top_pid,vram_top_name,vram_top_mib,reason"
+        "steam_appid,steam_appname,vgc,anticheat_svc,game_procs,vram_top_pid,vram_top_name,vram_top_mib,reason"
         ).split(",")
 
 T0 = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
@@ -82,7 +82,7 @@ def base(i, r):
         "gpu_healthy": "1", "counters_fresh": "1",
         "own_session": "1", "console_session": "1",
         "locked": "0", "input_idle_s": "4", "fullscreen": "0", "fg_process": "explorer",
-        "steam_appid": "0", "steam_appname": "", "vgc": "0", "game_procs": "",
+        "steam_appid": "0", "steam_appname": "", "vgc": "0", "anticheat_svc": "", "game_procs": "",
         "vram_top_pid": "1752", "vram_top_name": "dwm", "vram_top_mib": "169.4",
         "reason": "",
     }
@@ -172,6 +172,7 @@ def main():
     vgc = [dict(r) for r in idle[:120]]
     for r in vgc[80:]:
         r["vgc"] = "1"
+        r["anticheat_svc"] = "vgc"
     write("valorant_vgc.csv", vgc)
 
     # 8. The stream died. Fail closed.

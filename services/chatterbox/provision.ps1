@@ -17,7 +17,7 @@
 # NOTHING IS INSTALLED ON THE MACHINE. No Python, no CUDA Toolkit, no admin, no
 # reboot, no PATH edit, no registry write. Everything lands in one directory:
 #
-#   %LOCALAPPDATA%\ai-voice-worker\runtime\
+#   %LOCALAPPDATA%\idlegpu\runtime\
 #     uv.exe        a single ~17 MB binary with no prerequisites of its own
 #     python\       CPython 3.12, fetched by uv from python-build-standalone
 #     .venv\        the 112-package locked environment
@@ -39,10 +39,22 @@
 
 [CmdletBinding()]
 param(
-    [string]$Root = (Join-Path $env:LOCALAPPDATA 'ai-voice-worker\runtime'),
+    # Mandatory, and passed in by `idlegpu service install chatterbox`. There is no
+    # default on purpose: a provisioning script that guesses where to put six
+    # gigabytes is a provisioning script that will one day put them somewhere the
+    # uninstall does not reach.
+    [Parameter(Mandatory = $true)]
+    [string]$Root,
     # The project definition and lock. Defaults to the directory this script is in,
-    # which is how it works from a git checkout.
-    [string]$Project = (Split-Path -Parent $MyInvocation.MyCommand.Path),
+    # which is how it works both from a git checkout and from an installed copy.
+    #
+    # $PSScriptRoot, not $MyInvocation.MyCommand.Path. Inside a param() default the
+    # latter is NULL, because $MyInvocation there describes the caller rather than
+    # this script - so the default silently became empty and the whole install died
+    # with "Cannot bind argument to parameter 'Path' because it is null". Measured
+    # on spring, and $PSScriptRoot is empty there too under -File. Resolved in the
+    # body instead, where both are populated.
+    [string]$Project = '',
     [switch]$SkipModels
 )
 
@@ -66,18 +78,46 @@ function Clear-Status {
     try { Remove-Item -Force $statusFile -ErrorAction SilentlyContinue } catch { }
 }
 
+if (-not $Project) { $Project = Split-Path -Parent $MyInvocation.MyCommand.Path }
+
 try {
     New-Item -ItemType Directory -Force -Path $Root | Out-Null
 
     # Everything uv does stays inside $Root. HF_HOME matters most: the weights are
     # content-addressed, are shared across versions, and are the one part of the
-    # payload that must survive a reinstall - so they must never land inside .venv
-    # where a rebuild would take them with it.
-    $env:UV_PYTHON_INSTALL_DIR  = Join-Path $Root 'python'
-    $env:UV_PROJECT_ENVIRONMENT = Join-Path $Root '.venv'
-    $env:UV_CACHE_DIR           = Join-Path $Root 'cache'
-    $env:HF_HOME                = Join-Path $Root 'models'
-    $env:UV_PYTHON_DOWNLOADS    = 'automatic'
+    # payload that must survive a reinstall - so they must never land inside the
+    # virtual environment where a rebuild would take them with it.
+    #
+    # DEFERS TO THE ENVIRONMENT WHEN THERE IS ONE. `idlegpu service install` sets
+    # all of these before launching this script, and sets the SAME values again for
+    # the controller at run time (Install.ContainedEnvironment). If this script
+    # overrode them, provisioning would download weights to one path and the
+    # controller would look for them at another, and the first job would silently
+    # re-download three gigabytes. Setting them here is the fallback for running
+    # this script by hand.
+    function Default-Env([string]$name, [string]$value) {
+        if (-not [Environment]::GetEnvironmentVariable($name)) {
+            [Environment]::SetEnvironmentVariable($name, $value)
+        }
+    }
+    Default-Env 'UV_PYTHON_INSTALL_DIR'  (Join-Path $Root 'python')
+    Default-Env 'UV_PROJECT_ENVIRONMENT' (Join-Path $Root 'venv')
+    Default-Env 'UV_CACHE_DIR'           (Join-Path $Root 'cache\uv')
+    Default-Env 'HF_HOME'                (Join-Path $Root 'models\hf')
+    # HF_HUB_CACHE is the current name; the deprecated HUGGINGFACE_HUB_CACHE
+    # alone was not enough - diffusers still wrote into %USERPROFILE%\.cache.
+    Default-Env 'HF_HUB_CACHE'           (Join-Path $Root 'models\hf\hub')
+    Default-Env 'DIFFUSERS_CACHE'        (Join-Path $Root 'models\hf\hub')
+    Default-Env 'TORCH_HOME'             (Join-Path $Root 'models\torch')
+    # MEASURED: without UV_PYTHON_BIN_DIR, `uv python install` still drops a shim
+    # into %USERPROFILE%\.local\bin, outside the contained directory and outliving
+    # an uninstall. The agent sets this too; this is the by-hand fallback.
+    Default-Env 'UV_PYTHON_BIN_DIR'      (Join-Path $Root 'bin')
+    Default-Env 'UV_TOOL_DIR'            (Join-Path $Root 'tools')
+    Default-Env 'UV_TOOL_BIN_DIR'        (Join-Path $Root 'bin')
+    $env:UV_NO_CONFIG = '1'
+    $env:UV_PYTHON_DOWNLOADS = 'automatic'
+    Write-Host ("weights will go to HF_HOME = " + $env:HF_HOME)
 
     # ---------------------------------------------------------------- uv ---
     $uv = Join-Path $Root 'uv.exe'
@@ -109,7 +149,7 @@ try {
     & $uv sync --project $Project --frozen --no-dev
     if ($LASTEXITCODE -ne 0) { throw "uv sync failed" }
 
-    $py = Join-Path $Root '.venv\Scripts\python.exe'
+    $py = Join-Path $env:UV_PROJECT_ENVIRONMENT 'Scripts\python.exe'
     if (-not (Test-Path $py)) { throw "venv python missing at $py" }
 
     # ------------------------------------------------------------- gate ---
@@ -153,12 +193,47 @@ print("weights present")
         if ($LASTEXITCODE -ne 0) { throw "model download failed" }
     }
 
+    # ---------------------------------------------------------- reclaim ---
+    # THE WHEEL CACHE IS DEAD WEIGHT ONCE THE VENV EXISTS, and it is not small.
+    # Measured on spring after a successful install:
+    #
+    #   venv    5.01 GB     cache   4.96 GB     models  2.99 GB     python 0.06 GB
+    #
+    # 4.96 GB of downloaded wheels, on somebody's games drive, that will never be
+    # read again unless they reinstall. uv copies rather than hardlinks on this
+    # filesystem, which is why both numbers are full size and why deleting one
+    # does not damage the other - and that is asserted below rather than assumed,
+    # because if uv ever DID hardlink here, this step would silently gut the
+    # environment and the failure would appear at the first job instead.
+    Set-Status 'reclaiming the wheel cache'
+    & $uv cache clean
+    & $py -c "import torch, chatterbox; print('post-clean import ok', torch.__version__)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "the environment stopped importing after the cache was cleaned; " +
+              "uv must be hardlinking into the venv on this filesystem. " +
+              "Reinstall, and remove the cache clean above."
+    }
+
     Clear-Status
+
+    # THE READY MARKER, AND IT IS THE LAST THING THIS SCRIPT DOES. Six gigabytes is
+    # twenty minutes of download; an install interrupted at fifteen must read as
+    # "not installed" rather than "installed and broken". The first is fixed by
+    # running this again, the second is a support question. `idlegpu service list`
+    # reads exactly this file and nothing else.
+    $torchVersion = (& $py -c "import torch; print(torch.__version__)")
+    Set-Content -Path (Join-Path $Root '.installed') -Encoding UTF8 -Value @"
+service   = chatterbox
+python    = $py
+torch     = $torchVersion
+installed = $((Get-Date).ToUniversalTime().ToString('o'))
+"@
+
+    $size = (Get-ChildItem -Recurse -File $Root | Measure-Object -Property Length -Sum).Sum
     Write-Host ""
-    Write-Host "Runtime ready at $Root"
-    Write-Host "Set JobCommand in worker.ini to:"
-    Write-Host "  JobCommand = $py"
-    Write-Host "  JobArguments = `"$(Join-Path $Project 'runner.py')`" --queue `"$(Join-Path (Split-Path -Parent $Root) 'queue')`""
+    Write-Host ("chatterbox is installed at {0} ({1:N2} GB)" -f $Root, ($size / 1GB))
+    Write-Host "worker.ini needs, in [service.chatterbox]:"
+    Write-Host "  Command   = $py"
 }
 catch {
     Set-Status ("FAILED: " + $_.Exception.Message)

@@ -1,7 +1,7 @@
 // Turning a recorded CSV back into Snapshots.
 //
 // WHY THE FIXTURE FORMAT AND THE CALIBRATION FORMAT ARE THE SAME FORMAT. This
-// reads exactly what `ai-voice-worker.exe --calibrate game.csv 20` writes. That
+// reads exactly what `idlegpu.exe --calibrate game.csv 20` writes. That
 // is the whole point: when the user runs the agent through twenty minutes of a
 // real match, the CSV it produces drops straight into tests/fixtures/ and becomes
 // a regression test, with no conversion step and nobody transcribing numbers.
@@ -26,7 +26,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace AiVoice.Worker
+namespace IdleGpu
 {
     public static class Replay
     {
@@ -34,7 +34,7 @@ namespace AiVoice.Worker
             "iso_time,state,util_gpu,util_mem,enc,dec,mem_clk_mhz,sm_clk_mhz,pstate,power_w," +
             "mem_used_mib,eng_3d,eng_decode,eng_encode,gpu_healthy,counters_fresh," +
             "own_session,console_session,locked,input_idle_s,fullscreen,fg_process," +
-            "steam_appid,steam_appname,vgc,game_procs,vram_top_pid,vram_top_name,vram_top_mib,reason";
+            "steam_appid,steam_appname,vgc,anticheat_svc,game_procs,vram_top_pid,vram_top_name,vram_top_mib,reason";
 
         public static List<Snapshot> Load(string path)
         {
@@ -98,6 +98,14 @@ namespace AiVoice.Worker
             l.SteamRunningAppId = I(Get(f, idx, "steam_appid"));
             l.SteamRunningAppName = Get(f, idx, "steam_appname");
             l.ValorantAntiCheatActive = B(Get(f, idx, "vgc"), false);
+            // The NAME of the service that fired, not just that one did. The
+            // policy reads its list of anti-cheat service names from config now,
+            // so a recording that only carried a boolean could not tell a replay
+            // WHICH service was seen, and the verdict text lost the one detail
+            // that makes it actionable: vgc means a game, vgk means nothing
+            // because vgk is always running. Recordings made before this column
+            // existed simply have no name, which is what the empty default is for.
+            l.AntiCheatService = Get(f, idx, "anticheat_svc");
             string gp = Get(f, idx, "game_procs");
             if (gp.Length > 0)
                 foreach (string one in gp.Split(' '))

@@ -18,7 +18,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace AiVoice.Worker
+namespace IdleGpu
 {
     public enum Mode { Auto, AlwaysOn, Off }
 
@@ -70,6 +70,7 @@ namespace AiVoice.Worker
         public int SteamRunningAppId;     // 0 when Steam is running no game
         public string SteamRunningAppName;
         public bool ValorantAntiCheatActive;
+        public string AntiCheatService = "";
         public List<string> GameProcesses = new List<string>();
     }
 
@@ -91,7 +92,16 @@ namespace AiVoice.Worker
         public SessionSignals Session;
         public LauncherSignals Launchers;
         public List<ProcessGpuUse> GpuProcesses = new List<ProcessGpuUse>();
-        public int OwnJobPid = -1;        // our own child, never evidence of a user
+        /// Every controller process this agent currently owns. Never evidence of
+        /// a user, because they are the thing being decided about.
+        ///
+        /// WHY A SET AND NOT AN int. It was a single pid when the agent supervised
+        /// exactly one job. One runner now hosts many services, and although only
+        /// one controller runs at a time, a handoff overlaps two: the outgoing one
+        /// is inside its grace period while the incoming one has already started.
+        /// With a single pid the unexempted one reads as a foreign process holding
+        /// VRAM, the VRAM veto fires, and the agent yields to itself.
+        public HashSet<int> OwnJobPids = new HashSet<int>();
         public double Util3d;
         public double UtilVideoDecode;
         public double UtilVideoEncode;

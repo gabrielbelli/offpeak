@@ -1,4 +1,4 @@
-// Signal acquisition for the ai-voice GPU worker.
+// Signal acquisition: is anybody using this GPU?
 //
 // EVERY THRESHOLD AND EVERY CHOICE OF SIGNAL IN THIS FILE COMES FROM A
 // MEASUREMENT TAKEN ON THE TARGET MACHINE (spring, RTX 3070, driver 610.47,
@@ -23,7 +23,7 @@ using System.Text;
 using System.Threading;
 using Microsoft.Win32;
 
-namespace AiVoice.Worker
+namespace IdleGpu
 {
     // ---------------------------------------------------------------- GPU ---
 
@@ -479,7 +479,9 @@ namespace AiVoice.Worker
     /// for tampering.
     public static class Launchers
     {
-        public static LauncherSignals Read(string[] gameProcessNames)
+        /// The anti cheat service names come from configuration rather than from
+        /// a literal here, because the next one to matter will not be called vgc.
+        public static LauncherSignals Read(string[] gameProcessNames, string[] antiCheatServices)
         {
             var s = new LauncherSignals();
             s.SteamRunningAppId = 0;
@@ -539,15 +541,29 @@ namespace AiVoice.Worker
             }
             catch (Exception) { }
 
-            try
+            s.ValorantAntiCheatActive = false;
+            if (antiCheatServices != null)
             {
-                using (var sc = new ServiceController("vgc"))
+                foreach (string name in antiCheatServices)
                 {
-                    s.ValorantAntiCheatActive = (sc.Status == ServiceControllerStatus.Running ||
-                                                 sc.Status == ServiceControllerStatus.StartPending);
+                    string n = name.Trim();
+                    if (n.Length == 0) continue;
+                    try
+                    {
+                        using (var sc = new ServiceController(n))
+                        {
+                            if (sc.Status == ServiceControllerStatus.Running ||
+                                sc.Status == ServiceControllerStatus.StartPending)
+                            {
+                                s.ValorantAntiCheatActive = true;
+                                s.AntiCheatService = n;
+                                break;
+                            }
+                        }
+                    }
+                    catch (Exception) { /* not installed on this machine, which is fine */ }
                 }
             }
-            catch (Exception) { s.ValorantAntiCheatActive = false; }
 
             foreach (string want in gameProcessNames)
             {

@@ -1,58 +1,229 @@
-# ai-voice GPU worker settings. Copy to worker.ini beside the exe.
-# Every value here is the built-in default; the file only needs the lines you
-# actually want to change.
+# idlegpu settings. Copy to worker.ini beside idlegpu.exe.
+#
+# Every value here is the built-in default, so the file only needs the lines you
+# actually want to change. Section headers are for your eyes: the key names are
+# unique across the whole file and the parser does not care which section a line
+# is in.
+#
+# THE NUMBERS IN THIS FILE CAME OFF ONE MACHINE. Every threshold below was
+# measured on a single desktop with an RTX 3070 on Windows 11, and is written
+# down here rather than buried in the source so that you can change it without a
+# compiler. If your card idles differently, these are wrong for you. Run
+#   idlegpu --calibrate baseline.csv 20
+# while you are NOT using the machine, then again while you play, and set them
+# from what you see.
 
-# Auto | AlwaysOn | Off. The tray writes this line back when you change the mode,
-# so your choice survives a reboot.
+# Auto | AlwaysOn | Off. The tray and POST /v1/mode write this line back, so your
+# choice survives a reboot.
+#
+# START WITH Off IF YOU DO NOT TRUST IT YET. In Off mode the agent watches, logs
+# every verdict and never takes the GPU, so you can check a week of its opinions
+# against a week of your own gaming before you let it run anything.
 StartMode            = Auto
 
-# --- GPU load thresholds. Measured idle baseline on spring, 150 samples at 1 Hz
-#     on 2026-09-05: memory clock 810 MHz (zero variance), pstate P5 (150/150),
-#     power 34.55-36.02 W, utilisation 5-6%, memory 388 MiB (zero variance).
-#     Note what that rules out: "utilisation below 5%" can never be true here.
+
+# =====================================================================
+# [listener]  the HTTPS API
+# =====================================================================
+
+ListenerEnabled      = true
+
+# LOOPBACK BY DEFAULT, AND THAT IS A DECISION, NOT TIMIDITY. A non-elevated
+# process can bind 0.0.0.0 with no administrator rights, but it CANNOT open the
+# Windows Firewall. So a LAN bind is reachable from this machine and nowhere else
+# until somebody with administrator rights allows it once, and if a standard user
+# is prompted and dismisses it, Windows writes a BLOCK rule and never asks again.
+# That failure is permanent and silent. Loopback avoids all of it and still works
+# from anywhere over an SSH tunnel:
 #
-#     THE BUSY SIDE OF THESE FIVE IS NOT MEASURED. They are margins over the idle
-#     ceiling, not observed values under a game. Run --calibrate, or
-#     runtime/loadgen.py, before trusting them. See "What is not proven" in the
-#     README.
+#   ssh -N -L 47600:127.0.0.1:47600 you@thatmachine
+#
+# Set Bind = 0.0.0.0 only if you also set an ApiKeyFile and AllowedCidrs. The
+# agent refuses to start a non-loopback listener without both.
+Bind                 = 127.0.0.1
+Port                 = 47600
+
+# The bearer token. A file keeps the secret out of a config you might paste into
+# a bug report. Leave both unset on loopback; the agent generates a key file for
+# you if you set ApiKeyFile and bind beyond loopback.
+# ApiKeyFile         = C:\Users\you\AppData\Local\idlegpu\api-key.txt
+# ApiKey             =
+
+# Who may connect when Bind is not loopback. IPv4 CIDR, comma separated. Empty
+# means nobody but loopback.
+# AllowedCidrs       = 192.0.2.0/24
+
+# TLS. The agent mints a self-signed certificate on first run into the contained
+# directory, touching no certificate store. Clients pin the SHA-256 of it:
+#   idlegpu fingerprint
+# ServerName defaults to this machine's name, detected at run time. Add whatever
+# else clients will type in the address bar.
+# CertPath           = C:\Users\you\AppData\Local\idlegpu\certs\server.pfx
+# ServerName         = thatmachine
+# CertExtraSans      = thatmachine.lan,192.0.2.11
+# CertYears          = 5
+
+# What the CLI on THIS machine uses to reach a runner. Only the client reads
+# these; the agent ignores them. Unset means "the local agent".
+# ClientHost         = 192.0.2.11
+# ClientPort         = 47600
+# CertFingerprint    = aa62a67f...   (idlegpu fingerprint on the runner prints it)
+
+# Limits for a hand written server that may end up on a LAN. These are the
+# slowloris knobs: a client that opens a socket and dribbles one byte a minute is
+# stopped by RequestTimeoutMs, and MaxConnections is the whole blast radius of a
+# flood, because the policy loop shares no lock with any of this.
+MaxRequestBytes      = 8388608
+MaxHeaderCount       = 64
+MaxHeaderLineBytes   = 8192
+HandshakeTimeoutMs   = 5000
+RequestTimeoutMs     = 15000
+MaxConnections       = 16
+MaxPassthroughBytes  = 262144
+
+
+# =====================================================================
+# [gpu]  when the machine counts as busy
+# =====================================================================
+#
+# Measured idle baseline, 150 samples at 1 Hz, RTX 3070, desktop up and untouched:
+#   memory clock 810 MHz (zero variance)   pstate P5 (150 of 150)
+#   power 34.55-36.02 W                    utilisation 5-6%
+#   memory 388 MiB (zero variance)
+#
+# Note what that rules out: "utilisation below 5%" can NEVER be true on that
+# machine. The naive threshold is not imprecise here, it is unreachable. The
+# clock, the pstate and the power figure separate far more cleanly, which is why
+# the policy leans on them and treats utilisation as the weakest vote.
+#
+# THE BUSY SIDE OF THESE IS A MARGIN, NOT A MEASUREMENT. They are set clear of a
+# measured idle ceiling, not observed under a game. Run --calibrate before
+# trusting them.
 MemClockBusyMhz      = 1500
 PowerBusyWatts       = 70
 UtilGpuBusyPct       = 25
 Util3dBusyPct        = 20
+
+# The performance states your card sits in when it is doing nothing. P5 is what
+# one 3070 idles at; other cards idle at P8 or P0, and a card that idles at P0
+# would make this vote fire constantly. This is the setting most likely to be
+# wrong for you and it is here, in config, rather than in the source.
 IdlePStates          = P5,P8,P12
 
-# --- The paused-game veto. Largest thing measured holding GPU memory on an idle
-#     desktop was dwm at 169.4 MiB; largest non-shell process was CamoStudio at
-#     112.3 MiB. 512 is three times that. This is the only signal that catches a
-#     game paused at a menu, which draws nothing but still owns its VRAM.
+# THE PAUSED GAME VETO, and the only signal that catches it. A game sitting at a
+# menu draws nothing and still owns its VRAM. Per-process VRAM is [N/A] in
+# nvidia-smi under Windows display drivers, so this comes from the Windows
+# performance counters instead. Largest thing measured on an idle desktop was the
+# compositor at 169 MiB; 512 is three times that and far below what any game holds.
+# On a card with much more or much less memory than 8 GiB, revisit it.
 ForeignVramBusyMiB   = 512
 
-# --- Timing. Detection is fast, release is slow, on purpose: a false "busy"
-#     costs one job, a false "idle" costs the user their game.
+# Processes allowed to hold GPU memory without being read as a game.
+#
+# THIS LIST IS FROM ONE PERSON'S DESKTOP AND WILL BE WRONG FOR YOURS. Anything
+# you run that holds more than ForeignVramBusyMiB and is not here will make the
+# agent yield for ever. `idlegpu status --json` shows what it is objecting to
+# under foreign_vram, which is how you find out what to add.
+VramAllowlist        = dwm,explorer,csrss,ShellHost,SearchHost,StartMenuExperienceHost,ShellExperienceHost,ApplicationFrameHost,SystemSettings,CrossDeviceResume,TextInputHost,SearchApp,System,msedgewebview2,steamwebhelper,steam,steamservice,LogonUI,sihost,ctfmon
+
+# Process names whose presence alone means yield, whether or not they are drawing.
+#
+# ALSO FROM ONE PERSON'S LIBRARY. This list is hand maintained and will be
+# incomplete: Epic, Game Pass, GOG and Battle.net set no Steam RunningAppID, so
+# for anything launched from those the VRAM veto above is the only backstop.
+GameProcessNames     = cs2,RainbowSix,RainbowSixGame,ReadyOrNot,GRB,VALORANT-Win64-Shipping,VALORANT,LeagueOfLegends
+
+# Anti-cheat services whose running state means a game is up. Measured on one
+# machine: Vanguard installs vgk, a kernel driver that is ALWAYS running and
+# therefore says nothing, and vgc, a user mode service that starts with the game.
+# vgc is the useful one. Add whatever the next one is called.
+AntiCheatServices    = vgc
+
+
+# =====================================================================
+# [timing]  detection is fast, release is slow, on purpose
+# =====================================================================
+#
+# A false "busy" costs one job. A false "idle" costs somebody their game. So the
+# cooldown is deliberately far longer than the detection window.
 BusyConfirmSamples   = 3
 ClearCooldownSeconds = 90
 YieldGraceSeconds    = 2
 FastPollMs           = 1000
-# 2000, not 5000: this is the entire detection latency for an unknown game, which
-# is caught by the VRAM veto and nothing else. Reading the counters in-process
-# costs 98 ms (measured), so the slower poll bought almost nothing and cost three
+# 2000, not 5000: this is the ENTIRE detection latency for an unknown game, which
+# is caught by the VRAM veto and nothing else. Reading the counters in process
+# costs about 100 ms, so a slower poll bought almost nothing and cost three
 # seconds of somebody's frame time.
 CounterPollMs        = 2000
+# How often the scheduler looks for queued work. On its own thread, never on the
+# policy loop, because listing every service's queue is a syscall per service.
+SchedulerPollMs      = 500
 
-# --- What to run when the GPU is ours. Empty means detection only, which is what
-#     this proof of concept ships as. runtime/provision.ps1 prints the two lines
-#     to paste here once the runtime is installed.
-# JobCommand         = C:\Users\you\AppData\Local\ai-voice-worker\runtime\.venv\Scripts\python.exe
-# JobArguments       = "C:\...\runtime\runner.py" --queue "C:\...\ai-voice-worker\queue"
-# JobWorkingDir      =
 
-# --- To exercise the yield path with no Python and no GPU, point JobCommand at
-#     runtime\fake_job.ps1 instead. Add -Stubborn to make it ignore YIELD and
-#     force the job-object kill, which is the path the real runtime relies on.
-# JobCommand         = C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
-# JobArguments       = -ExecutionPolicy Bypass -NoProfile -File C:\...\runtime\fake_job.ps1
+# =====================================================================
+# [service.<id>]  what this runner can do
+# =====================================================================
+#
+# NOTHING BELOW IS INSTALLED. Both sections ship with Enabled = false, and the
+# agent will not fetch, launch or even create a queue directory for a service
+# that is not opted in. A base install is one 120 KB executable that downloads
+# nothing; a machine whose owner never asks for speech never sees a byte of torch.
+#
+# Three states, and the CLI and the API report all three separately:
+#
+#   known      there is a section for it here. Costs nothing.
+#   installed  its provisioning ran and left a marker. Real disk committed.
+#   ready      installed AND Enabled = true. The scheduler will run it.
+#
+# and separately, because it is a property of the MACHINE and not of a service:
+# whether the GPU is free right now. A client that cannot tell "speech is not
+# installed" from "somebody is gaming" retries for ever against a runner that was
+# never going to say yes.
+#
+#   idlegpu service list             what is known, and what each would cost
+#   idlegpu service install echo     fetch it, then turn it on
+#   idlegpu service cost             what each one is using, measured
+#   idlegpu service remove echo      delete it and reclaim the disk
+#
+# Adding a service of your own is one section here plus one controller script and
+# no C# at all. See docs/ADDING-A-SERVICE.md.
 
-# --- Comma separated. Add whatever else gets played on this machine. This list is
-#     hand-maintained and will be wrong: Epic, Game Pass, GOG and Battle.net set
-#     no Steam RunningAppID, so for those the VRAM veto is the only backstop.
-GameProcessNames     = cs2,RainbowSix,RainbowSixGame,ReadyOrNot,GRB,VALORANT-Win64-Shipping,VALORANT,LeagueOfLegends
+# The one that needs no GPU and no downloads worth mentioning. Install this
+# first: it exercises the entire path - submit, schedule, run, yield, artefact -
+# in about 25 MB, so you find out whether this program works on your machine
+# before you spend six gigabytes finding out whether speech does.
+[service.echo]
+Enabled              = false
+Description          = burns CPU for a few seconds and writes the text back
+Priority             = 5
+Labels               = test,cpu,no-gpu
+YieldGraceSeconds    = 2
+SizeHint             = about 25 MB (an embeddable CPython, no packages)
+Provision            = echo\provision.ps1
+# Written by the provisioning script. Until then this path does not exist, which
+# is exactly what makes the service read as known rather than installed.
+Command              = %RUNTIME%\echo\python\python.exe
+Arguments            = "%SCRIPTS%\echo\controller.py" --queue "%QUEUE%"
+
+# Speech on the GPU. THE EXPENSIVE ONE, and the reason opting in exists at all.
+[service.chatterbox]
+Enabled              = false
+Description          = Chatterbox multilingual text to speech
+Priority             = 10
+Labels               = speech,tts,audio
+YieldGraceSeconds    = 2
+SizeHint             = about 8.1 GB (5.0 GB of torch cu126 and friends, 3.0 GB of weights)
+Provision            = chatterbox\provision.ps1
+Command              = %RUNTIME%\chatterbox\venv\Scripts\python.exe
+Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%"
+
+# %RUNTIME%, %SCRIPTS% and %QUEUE% above are expanded by the agent, so this file
+# has no absolute path in it and works unedited on anybody's machine:
+#
+#   %RUNTIME%  RuntimeRoot, where services put what they download
+#              (default %LOCALAPPDATA%\idlegpu\runtime)
+#   %SCRIPTS%  ScriptsRoot, where the controller scripts were installed
+#              (default %LOCALAPPDATA%\idlegpu\services)
+#   %QUEUE%    this service's own queue directory
+#
+# Write absolute paths instead if you would rather; nothing requires these.
