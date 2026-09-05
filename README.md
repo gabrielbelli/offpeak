@@ -565,6 +565,12 @@ That is everything, including every gigabyte any service downloaded. Add
 if you installed with `-UseRunKey`, and remove the inbound firewall rule if you
 ever created one.
 
+> If you installed a service before this note existed, check for
+> `%USERPROFILE%\.pkuseg` and delete it. One chatterbox dependency built that
+> path in code rather than reading a variable, so it escaped the contained
+> directory and survived `service remove`. Installs from here point the child's
+> home directory inside the install, which closes it.
+
 To reclaim a service's disk without uninstalling:
 
 ```powershell

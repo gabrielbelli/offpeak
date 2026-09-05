@@ -319,6 +319,27 @@ namespace IdleGpu
             e["UV_NO_CONFIG"] = "1";
             e["TMP"] = Path.Combine(cache, "tmp");
             e["TEMP"] = Path.Combine(cache, "tmp");
+            // THE THIRD MEASURED LEAK, and the one no environment variable of its
+            // own can close. spacy-pkuseg is a locked chatterbox dependency and it
+            // resolves its model directory with expanduser("~/.pkuseg"), a path
+            // built in code with no variable to override. Installing chatterbox
+            // wrote 90.4 MB to %USERPROFILE%\.pkuseg, `service remove` left it, and
+            // the README's "delete the folder, that is everything" was false
+            // because of it.
+            //
+            // So the home directory ITSELF is redirected for the child. On Windows
+            // CPython, expanduser("~") returns USERPROFILE, so this catches every
+            // library that builds a dotfile path that way rather than only the one
+            // that was caught. HOME is set alongside because the same libraries
+            // check it first on other platforms and some check it here too.
+            //
+            // Safe because this environment is only ever handed to a service
+            // subprocess whose caches, models, temp and interpreter are already
+            // inside `root`. Nothing in it has business reading the real profile,
+            // and anything that did would be reaching outside the contained
+            // directory, which is the thing being prevented.
+            e["USERPROFILE"] = root;
+            e["HOME"] = root;
             try { Directory.CreateDirectory(Path.Combine(cache, "tmp")); }
             catch (Exception) { }
             return e;
