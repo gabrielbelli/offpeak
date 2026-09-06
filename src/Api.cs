@@ -104,6 +104,10 @@ namespace IdleGpu
 
             if (seg.Length == 2 && seg[1] == "mode") { Mode(q, outp, ctx); return; }
 
+            if (seg.Length == 2 && seg[1] == "profile") { Profile(q, outp, ctx); return; }
+
+            if (seg.Length == 2 && seg[1] == "limits") { Limits(q, outp, ctx); return; }
+
             if (seg.Length == 2 && seg[1] == "presence") { Presence(q, outp, ctx); return; }
 
             if (seg[1] == "assets") { Assets(q, seg, outp, ctx); return; }
@@ -480,6 +484,115 @@ namespace IdleGpu
                 Json.P("note", Json.Esc("applied at the top of the next policy tick"))) + "\n");
         }
 
+        // -- posture and limits ---------------------------------------------------
+        //
+        // POLICY MUST BE EDITABLE WITHOUT A GUI. The settings window is the nice
+        // way to see the whole matrix at once, and it needs a desktop session to
+        // exist. An agent running as a boot task under SYSTEM has no desktop, and
+        // the person who wants to change what their headless machine lends out
+        // over SSH is exactly the person this program is for. So the same two
+        // changes the window makes are a route and a CLI verb as well, and all
+        // three go through Agent.DrainCommands so the policy thread stays the
+        // single writer.
+
+        static void Profile(HttpRequest q, Stream outp, ApiContext ctx)
+        {
+            if (q.Method != "POST") { Http.WriteError(outp, 405, "POST to change the posture"); return; }
+            string want = q.Param("profile");
+            if (string.IsNullOrEmpty(want)) want = Json.PeekString(q.BodyText(), "profile");
+            if (string.IsNullOrEmpty(want)) want = q.BodyText().Trim();
+            if (string.IsNullOrEmpty(want))
+            {
+                Http.WriteError(outp, 400, "profile must be one of: "
+                    + string.Join(", ", Config.ProfileIds()));
+                return;
+            }
+            if (ctx.Config.ResolveProfile(want) == null)
+            {
+                Http.WriteError(outp, 400, "no posture called '" + want + "'; known: "
+                    + string.Join(", ", Config.ProfileIds()));
+                return;
+            }
+            var cmd = new Command();
+            cmd.Kind = "profile";
+            cmd.Value = want;
+            if (!ctx.Agent.Submit(cmd))
+            {
+                Http.WriteError(outp, 503, "the command queue is full; try again");
+                return;
+            }
+            Http.WriteText(outp, 202, "application/json", Json.Obj(
+                Json.P("accepted", Json.Esc(Config.NormaliseProfile(want))),
+                Json.P("note", Json.Esc("applied at the top of the next policy tick, "
+                    + "and it binds to a job that is already running"))) + "\n");
+        }
+
+        static void Limits(HttpRequest q, Stream outp, ApiContext ctx)
+        {
+            if (q.Method != "POST") { Http.WriteError(outp, 405, "POST to change one row"); return; }
+            string body = q.BodyText();
+            string state = q.Param("state");
+            if (string.IsNullOrEmpty(state)) state = Json.PeekString(body, "state");
+            if (string.IsNullOrEmpty(state))
+            {
+                Http.WriteError(outp, 400,
+                    "state must be one of: nobodyhome, locked, idle, lightuse, busy");
+                return;
+            }
+            // Built as the same `state field=value` line the CLI sends and the
+            // worker.ini parser understands, so there is one syntax to learn and
+            // one place it is interpreted.
+            var spec = new StringBuilder(state.Trim().ToLowerInvariant());
+            AddField(spec, q, body, "gpu");
+            AddField(spec, q, body, "cpu_pct", "cpupct");
+            AddField(spec, q, body, "priority");
+            AddField(spec, q, body, "working_set_mib", "workingsetmib");
+            AddField(spec, q, body, "min_free_mib", "minfreemib");
+            AddField(spec, q, body, "admit");
+
+            MachineState st; ResourceLimits row;
+            if (!Config.ParseLimitsCommand(ctx.Config, spec.ToString(), out st, out row))
+            {
+                Http.WriteError(outp, 400,
+                    "state must be one of: nobodyhome, locked, idle, lightuse, busy");
+                return;
+            }
+            var cmd = new Command();
+            cmd.Kind = "limits";
+            cmd.Value = spec.ToString();
+            if (!ctx.Agent.Submit(cmd))
+            {
+                Http.WriteError(outp, 503, "the command queue is full; try again");
+                return;
+            }
+            Http.WriteText(outp, 202, "application/json", Json.Obj(
+                Json.P("accepted", Json.Esc(spec.ToString())),
+                // A row can be tightened on the way in, because the cooldown
+                // ratchet assumes the ladder is monotone. Saying what was asked
+                // for is not the same as saying what will be in force, so the
+                // caller is told to read it back rather than assume.
+                Json.P("note", Json.Esc("applied at the top of the next policy tick; "
+                    + "read GET /v1/services to see what is in force, because a row "
+                    + "more generous than the one above it is tightened"))) + "\n");
+        }
+
+        static void AddField(StringBuilder sb, HttpRequest q, string body, string name)
+        {
+            AddField(sb, q, body, name, name);
+        }
+
+        static void AddField(StringBuilder sb, HttpRequest q, string body, string name, string key)
+        {
+            string v = q.Param(name);
+            if (string.IsNullOrEmpty(v)) v = Json.PeekString(body, name);
+            if (string.IsNullOrEmpty(v)) return;
+            // A value with a space in it would break the space-separated spec.
+            // None of these fields has one; a bad value is dropped rather than
+            // corrupting the fields after it.
+            if (v.IndexOf(' ') >= 0) return;
+            sb.Append(" ").Append(key).Append("=").Append(v);
+        }
+
         // -- auth ----------------------------------------------------------------
 
         static bool Authorised(HttpRequest q, ApiContext ctx)
@@ -531,6 +644,8 @@ namespace IdleGpu
             routes.Add("GET    /v1/assets/{sha256}                       fetch it back");
             routes.Add("POST   /v1/assets                                store bytes, returns {sha256}");
             routes.Add("POST   /v1/mode                                  Auto | AlwaysOn | Off");
+            routes.Add("POST   /v1/profile                               generous | balanced | away | <saved id>");
+            routes.Add("POST   /v1/limits                                one row: {state, cpu_pct, priority, ...}");
             var sb = new StringBuilder();
             sb.Append("{\"routes\":[");
             for (int i = 0; i < routes.Count; i++)

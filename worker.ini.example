@@ -219,6 +219,28 @@ SchedulerPollMs      = 500
 # Delete any line to get its default back. Delete the whole section for all of
 # them. The numbers below ARE the defaults.
 
+# THE POSTURE. A name for the whole matrix below, because twenty-five numbers is
+# a form and nobody fills in a form to lend somebody a computer.
+#
+#   generous   use it unless I am actually gaming
+#   balanced   use it while I am away, and stay out of my way when I am here
+#   away       never while I am signed in and unlocked
+#
+# PRECEDENCE, AND IT DOES NOT DEPEND ON LINE ORDER. Profile fills every cell
+# below; any limits.<state>.<field> line then overrides that ONE cell, whether it
+# appears above this line or below it. If any override differs from the named
+# posture, the runner reports the posture as `custom` and the tray says "Custom,
+# based on Balanced". Nothing is silently reinterpreted.
+#
+# A posture of your own goes in a [profile.<id>] section at the bottom of this
+# file, in the same shape, and then appears in the tray beside these three. The
+# settings window writes one for you.
+#
+# NOT A PROFILE: Off. That is Mode, the big switch, and a posture called Off
+# would give the runner two encodings of one state and a status line reading
+# "Auto, posture Off" that nobody could parse.
+Profile              = balanced
+
 # How long without input before "signed in" becomes "idle". Five minutes matches
 # the shortest screen blank most people leave set, so the state this calls idle
 # is one the owner would also call idle.
@@ -236,6 +258,7 @@ limits.nobodyhome.cpupct        = 100
 limits.nobodyhome.priority      = normal
 limits.nobodyhome.workingsetmib = 0
 limits.nobodyhome.minfreemib    = 1024
+limits.nobodyhome.admit         = yes
 
 # Signed in but locked: nobody is at it either, so nearly as free. Below normal
 # priority is a courtesy to whatever the owner left running, a backup or a
@@ -245,6 +268,7 @@ limits.locked.cpupct            = 100
 limits.locked.priority          = belownormal
 limits.locked.workingsetmib     = 0
 limits.locked.minfreemib        = 2048
+limits.locked.admit             = yes
 
 # Signed in and idle: at the machine but not touching it. The cap is a hedge
 # rather than a limit; it is here so a job does not have the machine flat out at
@@ -254,6 +278,7 @@ limits.idle.cpupct              = 50
 limits.idle.priority            = idle
 limits.idle.workingsetmib       = 0
 limits.idle.minfreemib          = 4096
+limits.idle.admit               = yes
 
 # Light use: the one state where somebody is actually there. Measured against an
 # eight thread foreground workload and a memory-heavy background job on a 16
@@ -274,13 +299,34 @@ limits.lightuse.cpupct          = 10
 limits.lightuse.priority        = idle
 limits.lightuse.workingsetmib   = 8192
 limits.lightuse.minfreemib      = 6144
+limits.lightuse.admit           = yes
 
-# Busy or gaming: absolutely hands off.
+# Somebody is using it: hands off.
+#
+# BUSY IS SPLIT BY RESOURCE, which is why this row bites far less often than it
+# reads. A game contends the CARD and leaves twelve threads idle; a compile
+# contends the PROCESSOR and leaves the card at five per cent. When only one of
+# them is contended the OTHER column falls back to the light-use row above,
+# never to anything more generous, because a game is the strongest evidence
+# there is that somebody is at the machine. So this row in full is what an
+# unexplained busy gets, and what a game plus a compile together get.
+#
+# cpupct 0 means DO NOT RUN. Windows has no zero cap - SetInformationJobObject
+# rejects a CpuRate of 0 with INVALID_ARGS - so zero has to mean stop. The
+# generous posture ships 10 here instead, on the argument that a CPU yield
+# throttles rather than kills and a warm job has already paid a 22 second model
+# load. This is the one cell in the grid that has never been tested under a real
+# game, so balanced ships the cautious reading.
+#
+# admit = no is what keeps those two apart: hold the job that is already
+# running, start nothing new. MinFreeMib could only have said that with a number
+# so large it would have been a lie about memory.
 limits.busy.gpu                 = no
 limits.busy.cpupct              = 0
 limits.busy.priority            = idle
 limits.busy.workingsetmib       = 0
 limits.busy.minfreemib          = 0
+limits.busy.admit               = no
 
 
 # =====================================================================
@@ -352,6 +398,67 @@ Device               = gpu
 # Measured on a Ryzen 7 5700X3D with 31.9 GiB: 4,701 MiB after the model loaded,
 # on the CPU. Rounded up, because generation takes more than loading does.
 NeedsMemoryMib       = 6144
+
+# THE SAME SPEECH, ON THE PROCESSOR. One controller file, two service ids.
+#
+# WHY TWO IDS AND NOT ONE SERVICE WITH A FLAG. Four structural reasons, none of
+# them stylistic:
+#
+#   the queue is per service, one directory and one JobStore per id
+#   the manifest is per service, and unit_seconds genuinely differs by about
+#     three times between devices, so one manifest cannot honestly carry both
+#   Priority and YieldGraceSeconds are per service, and a CPU job that is
+#     throttled rather than killed wants a different grace from one that has a
+#     CUDA context to tear down
+#   the client already selects by service id, so nothing is invented for it
+#
+# NO SECOND VENV AND NO EXTRA DISK. The CUDA torch wheels already contain the
+# complete CPU backend, so this runs out of the same 8.2 GB runtime\chatterbox
+# venv that [service.chatterbox] provisioned. If you enable this one and not the
+# GPU one, provisioning still runs once and installs the same thing.
+#
+# WHEN THIS IS WORTH ENABLING. Measured on a Ryzen 7 5700X3D: see docs/CPU-
+# LIMITS.md for the realtime factor and what it does to the machine while it
+# runs. The honest summary is that a desktop CPU is a FALLBACK for when the card
+# is busy, not a replacement for it - but a fallback that keeps earning while a
+# game has the GPU is the entire point of selling both.
+[service.chatterbox-cpu]
+Enabled              = false
+Description          = Chatterbox text to speech, on the processor
+# Below the GPU one on purpose. When both have queued work and both may run, the
+# card should get the job it can finish several times faster.
+Priority             = 8
+Labels               = speech,tts,audio,cpu
+# Longer than the GPU's 2 s. A CPU controller has no CUDA context to tear down,
+# so the only thing the grace period buys is finishing the segment in flight -
+# and a segment on the processor takes several times as long as one on the card.
+YieldGraceSeconds    = 6
+SizeHint             = nothing extra; shares the chatterbox runtime
+Provision            = chatterbox\provision.ps1
+Command              = %RUNTIME%\chatterbox\venv\Scripts\python.exe
+# --device cpu BY NAME, not auto. On a machine with a card, auto would resolve to
+# cuda and this service would quietly become a second GPU service competing with
+# the first.
+Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%" --device cpu
+Device               = cpu
+# THE PEAK, NOT THE STEADY STATE, and the difference is the whole reason this
+# number exists. Measured on a Ryzen 7 5700X3D with 31.9 GiB, sampling every
+# three seconds through one real synthesis on the CPU:
+#
+#   t+13s   2,375 MiB     weights coming off disk
+#   t+19s   5,698 MiB
+#   t+22s   7,238 MiB     PEAK, while the checkpoint is still held
+#   t+25s   4,586 MiB     steady state, and it stays there for the whole job
+#
+# Sizing this at the 4,586 MiB steady state would admit a job that then asks for
+# another 2.6 GiB fifteen seconds later, which is exactly the moment the owner's
+# browser goes to disk. Paging is felt in a way CPU contention is not: a
+# throttled job makes things slower, a machine that is swapping makes them stop.
+# So it is the peak, rounded up.
+#
+# The admission check adds this to the row's MinFreeMib, so during light use this
+# service needs 6144 + 7168 = 13,312 MiB free before it will start.
+NeedsMemoryMib       = 7168
 
 # %RUNTIME%, %SCRIPTS% and %QUEUE% above are expanded by the agent, so this file
 # has no absolute path in it and works unedited on anybody's machine:

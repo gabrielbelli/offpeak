@@ -91,6 +91,14 @@ namespace IdleGpu
     ///                 not STARTED. A job not started costs a wait; a job started
     ///                 on a machine with no headroom costs the owner their session,
     ///                 and paging is felt in a way CPU contention is not.
+    ///   Admit        Whether a NEW job may start in this state at all. Separate
+    ///                from CpuPct because "keep the warm job at five per cent"
+    ///                and "invite more work" are different answers and MinFreeMib
+    ///                could only express the second as an absurd number. A CPU
+    ///                yield throttles rather than kills, so a running job that has
+    ///                already paid its 22 second model load and 4.7 GiB of
+    ///                allocation is worth keeping at a trickle; a new one is not
+    ///                worth starting.
     public class ResourceLimits
     {
         public bool Gpu = true;
@@ -98,12 +106,14 @@ namespace IdleGpu
         public string Priority = "normal";     // normal | belownormal | idle
         public int WorkingSetMib;              // 0 = do not limit the working set
         public int MinFreeMib;                 // 0 = start regardless of free memory
+        public bool Admit = true;              // may a NEW job start in this state
 
         public ResourceLimits Clone()
         {
             var r = new ResourceLimits();
             r.Gpu = Gpu; r.CpuPct = CpuPct; r.Priority = Priority;
             r.WorkingSetMib = WorkingSetMib; r.MinFreeMib = MinFreeMib;
+            r.Admit = Admit;
             return r;
         }
 
@@ -111,7 +121,71 @@ namespace IdleGpu
         {
             return o != null && o.Gpu == Gpu && o.CpuPct == CpuPct
                 && string.Equals(o.Priority, Priority, StringComparison.OrdinalIgnoreCase)
-                && o.WorkingSetMib == WorkingSetMib && o.MinFreeMib == MinFreeMib;
+                && o.WorkingSetMib == WorkingSetMib && o.MinFreeMib == MinFreeMib
+                && o.Admit == Admit;
+        }
+
+        /// Is this row at least as restrictive as the one above it in the ladder.
+        ///
+        /// WHY THIS EXISTS AT ALL. The cooldown ratchet in Policy.Evaluate holds
+        /// the WORST MachineState seen in the last ninety seconds and then looks
+        /// its row up, which quietly assumes that a worse state has a smaller row.
+        /// Nothing enforced that. A grid where Busy is more generous than LightUse
+        /// - reachable by hand editing worker.ini, by the settings window's
+        /// spinners, or by a saved custom profile - would invert the ratchet and
+        /// hand the job MORE machine at the moment the owner sat down. So the
+        /// grid is checked when it is loaded and when it is applied, and a row
+        /// that fails is tightened to the one above it rather than refused: a
+        /// person who mistypes a number must not end up with no agent.
+        public bool NoMoreThan(ResourceLimits looser)
+        {
+            if (looser == null) return true;
+            // A row that runs nothing cannot be too generous, whatever its other
+            // fields say. This is not a shortcut: WorkingSetMib and MinFreeMib
+            // describe a job that exists, and comparing them on a row that starts
+            // no job and holds no job produced false alarms on the shipped
+            // profiles themselves - "Only when I am away" sets Idle to nothing at
+            // all, and nothing at all has no working set ceiling to speak of,
+            // which read as "looser than the row above it".
+            if (CpuPct <= 0 && !Gpu) return true;
+            if (Gpu && !looser.Gpu) return false;
+            if (CpuPct > looser.CpuPct) return false;
+            if (PriorityRank(Priority) < PriorityRank(looser.Priority)) return false;
+            // A working set ceiling of 0 is NO ceiling, so it is the loosest value
+            // there is and cannot be compared as a number.
+            if (looser.WorkingSetMib > 0 && (WorkingSetMib == 0 || WorkingSetMib > looser.WorkingSetMib))
+                return false;
+            // Headroom only means anything on a row that will start something.
+            if (Admit && MinFreeMib < looser.MinFreeMib) return false;
+            if (Admit && !looser.Admit) return false;
+            return true;
+        }
+
+        /// 0 normal, 1 below normal, 2 idle. Higher means gentler.
+        public static int PriorityRank(string p)
+        {
+            string t = (p ?? "").Trim().ToLowerInvariant().Replace(" ", "").Replace("_", "");
+            if (t == "normal") return 0;
+            if (t == "belownormal" || t == "below" || t == "low") return 1;
+            return 2;
+        }
+
+        /// The more restrictive of two rows, field by field. Used to repair a
+        /// non-monotone grid without throwing away what the owner meant.
+        public static ResourceLimits Tighter(ResourceLimits a, ResourceLimits b)
+        {
+            if (a == null) return b;
+            if (b == null) return a;
+            var r = new ResourceLimits();
+            r.Gpu = a.Gpu && b.Gpu;
+            r.CpuPct = Math.Min(a.CpuPct, b.CpuPct);
+            r.Priority = PriorityRank(a.Priority) >= PriorityRank(b.Priority) ? a.Priority : b.Priority;
+            if (a.WorkingSetMib == 0) r.WorkingSetMib = b.WorkingSetMib;
+            else if (b.WorkingSetMib == 0) r.WorkingSetMib = a.WorkingSetMib;
+            else r.WorkingSetMib = Math.Min(a.WorkingSetMib, b.WorkingSetMib);
+            r.MinFreeMib = Math.Max(a.MinFreeMib, b.MinFreeMib);
+            r.Admit = a.Admit && b.Admit;
+            return r;
         }
 
         /// One line a person can read in a menu, in the words the menu uses.
@@ -126,7 +200,45 @@ namespace IdleGpu
                 parts.Add(Priority.ToLowerInvariant() == "idle" ? "idle priority" : "low priority");
             if (WorkingSetMib > 0)
                 parts.Add("RAM " + WorkingSetMib.ToString(CultureInfo.InvariantCulture) + " MiB");
+            if (!Admit) parts.Add("no new jobs");
             return string.Join(", ", parts.ToArray());
+        }
+    }
+
+    /// The kernel's CPU rate control, as arithmetic, so the one decision in it
+    /// can be tested without a job object.
+    ///
+    /// THE DEFECT THIS EXISTS TO PREVENT, and it was live. The rate write used to
+    /// be guarded by "CpuPct > 0 && CpuPct < 100", so a row asking for ZERO fell
+    /// through with a zeroed struct, and a zeroed struct means ControlFlags = 0,
+    /// which CLEARS the cap. Zero is the row a game produces. So at the exact
+    /// moment a game started, the job about to be stopped had its cap REMOVED and
+    /// ran flat out for the whole of YieldGraceSeconds while Stop() waited for it.
+    ///
+    /// CpuRate = 0 is not expressible: SetInformationJobObject rejects it with
+    /// INVALID_ARGS (measured on spring). So zero clamps to the smallest cap the
+    /// kernel will take, one per cent, and the cap is cleared only once the job
+    /// is actually gone.
+    public static class CpuRate
+    {
+        public const uint Enable = 0x00000001;
+        public const uint HardCap = 0x00000004;
+
+        /// Hundredths of one per cent of the WHOLE MACHINE, measured: a cap of 50
+        /// on sixteen spinning threads produced 50.2 per cent of the machine,
+        /// which is 8.03 cores, not half of one core.
+        public static void For(int cpuPct, out uint controlFlags, out uint rate)
+        {
+            if (cpuPct >= 100)
+            {
+                // Not a cap of one hundred per cent: the ABSENCE of a cap. Writing
+                // CpuRate = 10000 would leave the scheduler doing rate accounting
+                // for nothing. Measured: ControlFlags = 0 returned the job to 97.4
+                // per cent of the machine in one call.
+                controlFlags = 0; rate = 0; return;
+            }
+            controlFlags = Enable | HardCap;
+            rate = (uint)(cpuPct <= 0 ? 100 : cpuPct * 100);
         }
     }
 
@@ -324,6 +436,27 @@ namespace IdleGpu
 
         /// Which row of the limits matrix this instant lands on.
         public MachineState MachineState = MachineState.Busy;
+
+        /// WHICH RESOURCE IS ACTUALLY CONTENDED, which is the difference between
+        /// selling two things and selling one thing twice.
+        ///
+        /// Before these existed, MachineState.Busy meant "somebody wants this
+        /// machine" with no note of what they wanted, and the Busy row zeroes both
+        /// columns. So a Steam game - which touches the card and leaves twelve
+        /// threads idle - killed a CPU job for a GPU it had never opened, and a
+        /// sixteen thread compile - which leaves the card at five per cent - shut
+        /// down a GPU job. Both directions defeat the point of the product.
+        ///
+        /// When the effective state is Busy, an UNCONTENDED resource takes its
+        /// fields from the LightUse row instead of from Busy's. Never anything
+        /// more generous than LightUse, because a tier 1 veto is the strongest
+        /// evidence there is that somebody is at the machine.
+        ///
+        /// FAIL CLOSED. If neither flag is set - a state reached by blindness, or
+        /// by a signal nobody has classified yet - the Busy row is handed out
+        /// whole. Missing information must never read as permission.
+        public bool GpuContended;
+        public bool CpuContended;
 
         /// The row itself, already resolved. Never null after Evaluate.
         public ResourceLimits Limits = new ResourceLimits();

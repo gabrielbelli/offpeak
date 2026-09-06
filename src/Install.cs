@@ -300,6 +300,25 @@ namespace IdleGpu
             e["TORCH_HOME"] = Path.Combine(root, "models", "torch");
             e["TRANSFORMERS_CACHE"] = Path.Combine(root, "models", "hf", "transformers");
             e["XDG_CACHE_HOME"] = cache;
+            // THE SPIN TRAP, and it is the difference between a cap that costs
+            // throughput in proportion and one that destroys it.
+            //
+            // Torch's OpenMP runtime does not sleep a worker thread when a parallel
+            // region ends: it BUSY-SPINS, waiting for the next one, for
+            // KMP_BLOCKTIME milliseconds - 200 by default. On an unconstrained
+            // machine that is a sensible trade, because a spin is cheaper than a
+            // context switch and the next region is usually imminent.
+            //
+            // Under a HARD CAP it is the worst possible behaviour. The kernel
+            // counts spinning as work, so the job spends its entire budget for the
+            // scheduling interval doing nothing, is descheduled, and the real work
+            // waits for the next interval. A ten per cent cap stops being a ten per
+            // cent slowdown and becomes an arbitrary one.
+            //
+            // PASSIVE makes a finished worker block instead. Set on the child only,
+            // like everything else here; nothing is written to the machine.
+            e["OMP_WAIT_POLICY"] = "PASSIVE";
+            e["KMP_BLOCKTIME"] = "0";
             e["PIP_CACHE_DIR"] = Path.Combine(cache, "pip");
             e["UV_CACHE_DIR"] = Path.Combine(cache, "uv");
             e["UV_PYTHON_INSTALL_DIR"] = Path.Combine(root, "python");

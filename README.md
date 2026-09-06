@@ -198,7 +198,31 @@ a small matrix rather than a switch.
 | Signed in, locked | nobody is at the keyboard | everything, at below-normal priority |
 | Signed in, idle | no input for five minutes | the GPU, and half the CPU |
 | Signed in, light use | reading, typing, a browser | the GPU, and a tenth of the CPU |
-| Busy or gaming | a game exists, or somebody else's work is on the CPU | nothing |
+| Somebody is using it | a game exists, or somebody else's work is on the CPU | nothing |
+
+**Busy is split by resource, which is the whole point of selling two.** A game
+contends the **card** and leaves twelve threads idle; a compile contends the
+**processor** and leaves the card at five per cent. When only one of them is
+contended, the other column falls back to the **light-use** row rather than to
+nothing:
+
+| what is happening | the card | the processor |
+|---|---|---|
+| a game | closed | light-use row |
+| a compile | light-use row | Busy row |
+| a game and a compile | closed | Busy row |
+| the agent cannot see you | closed | closed |
+
+Light use and never anything more generous, because a game is the strongest
+evidence there is that somebody is at the machine - stronger than the session
+signals, since a full-screen game leaves the input-idle timer running while
+somebody plays it with a controller. And fail closed: a busy that neither flag
+explains gets the whole Busy row.
+
+**One controller per device, not one per machine.** A GPU service and a CPU
+service run at the same time, with their own busy checks and their own priority
+contests. They share only the memory admission check, because there is one pool
+of system memory.
 
 **Locked or signed out means unlimited, by default.** When nobody is at the
 machine there is nobody to disturb, so there is nothing to throttle. It is a
@@ -244,15 +268,69 @@ a half from a keystroke to a throttled job, and unlike the GPU it costs nothing,
 because the job is squeezed rather than killed and there is no model to load
 again.
 
-Two places to change it:
+### Postures, because thirty numbers is a form
 
-- **the tray**, for the state you are in right now: four named rungs, one click,
-  and the menu says what is currently in force rather than only offering choices;
-- **the settings window**, `All states and limits...`, for the whole matrix seen
-  at once.
+Five states by six settings is thirty cells, and nobody fills in a form to lend
+somebody a computer. So a **posture** sits on top of the grid: a name, a complete
+matrix, and one sentence saying what it means.
 
-Both bind immediately and both are written back to `worker.ini`, so nothing
-resets at the next login.
+| Posture | What it means |
+|---|---|
+| Generous | use it unless I am actually gaming |
+| **Balanced** (default) | use it while I am away, and stay out of my way when I am here |
+| Only when I am away | never while I am signed in and unlocked |
+| Off | sell nothing - the existing mode, shown here because you are choosing between four answers |
+
+`Off` is deliberately **not** a fourth matrix. Mode is the big switch; a posture
+is what Auto *means*.
+
+Pick one, then override any single cell you disagree with. `Profile = balanced`
+fills every cell; a `limits.<state>.<field>` line then overrides that one,
+whichever order they appear in. Change anything and the runner says **"Custom,
+based on Balanced"** rather than quietly claiming to be something it is not.
+`Save as...` in the window puts your own posture in the tray beside the three
+built-in ones.
+
+**A row can never be more generous than the row above it.** The cooldown holds
+the worst state seen in the last ninety seconds and looks its row up, which
+assumes the ladder only goes one way. A grid that inverted it would hand the job
+*more* machine the moment you sat down. Rows are tightened at load and on apply,
+and the repair is logged rather than silent.
+
+### Four places to change it
+
+- **the tray**, for the state you are in **right now**: four named rungs, one
+  click. The menu is titled with the row it edits - `Right now (nobody signed
+  in)` - because you reach for it exactly when you can feel the machine, which is
+  the moment you are least likely to mean the row you are actually in.
+- **the tray's posture menu**, for the whole matrix under a name.
+- **the settings window**, `All states and limits...`, for every cell at once,
+  with a live line saying what is in force and what the job is taking.
+- **a route and a CLI verb**, because an agent running as a boot task under
+  SYSTEM has no desktop and the person changing what a headless machine lends out
+  is usually on SSH:
+
+      idlegpu profile balanced
+      idlegpu limits lightuse cpupct=25 admit=no
+      POST /v1/profile   {"profile": "balanced"}
+      POST /v1/limits    {"state": "lightuse", "cpu_pct": 25, "admit": false}
+
+All four bind immediately to a job that is **already running**, all four are
+written back to `worker.ini`, and all four arrive at the same command queue so
+the policy thread stays the single writer. Nothing resets at the next login.
+
+**Every surface says what is in force**, not only what is on offer. Where the
+kernel has refused something - the RAM ceiling needs a privilege an ordinary
+account does not have - the column is **greyed out**, not footnoted. A number
+displayed while the kernel has refused it is the worst kind of wrong.
+
+### Keeping a warm job is not the same as inviting a new one
+
+A CPU yield **throttles**; it does not kill. A job that has already paid its 22
+second model load and 4.7 GiB of allocation is worth holding at a trickle while
+you use the machine. A *new* one is not worth starting. That is the `admit`
+column, and it is a field of its own because `min free MiB` could only have said
+it with a number so large it would have been a lie about memory.
 
 ### Checking it on your machine
 
@@ -261,6 +339,33 @@ resets at the next login.
 Runs the same code the tray runs against a real job object for about fifty
 seconds, prints the measured share of your machine at each rung, and says whether
 the memory cap is available to your account. It exits on its own.
+
+### What the processor is actually worth
+
+One real synthesis through the shipped path, on that desktop, with nobody signed
+in and no cap in force:
+
+    load                22.3 s
+    audio produced       7.0 s
+    compute             28.97 s
+    realtime factor      0.242x, at 8 threads
+    resident, steady   4,586 MiB
+    resident, peak     7,238 MiB, while the checkpoint is still held
+
+**That is not the flattering answer and it is worth saying plainly.** Against a
+2016 Xeon E5-2697 v4 measured at 0.230x on the same model, a 2022 Ryzen with 96
+MiB of V-Cache is about five per cent faster, not two or three times. Chatterbox
+is autoregressive at batch one, so it is bound by single-thread latency rather
+than throughput, and there is less to win than the specifications suggest.
+
+A desktop processor is a **fallback for when the card is busy**, not a
+replacement for it. It is still worth having, because it is a fallback that keeps
+earning while a game has the GPU and degrades instead of aborting.
+
+The thread count matters more than it looks: at 100 per cent the runner asks for
+the **physical** core count rather than the logical one, because two sibling
+threads on one core share the L1, the L2 and the front end and this model's whole
+advantage is a cache it walks every token.
 
 The numbers in this README came from one desktop, an AMD Ryzen 7 5700X3D with
 31.9 GiB running Windows 11. `docs/CPU-LIMITS.md` has the full measurements, what
@@ -691,7 +796,7 @@ week first**, which is the recommended first step anyway.
 powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-**172 assertions, about a second, and no network, no GPU, no NVIDIA driver, no
+**400 assertions, about a second, and no network, no GPU, no NVIDIA driver, no
 game and no console session.** They link `Model`, `Config`, `Policy`, `Replay`,
 `Jobs`, `Http` and `Install` and nothing else — no `Signals.cs`, so no user32, no
 PDH, no registry; no `Listener.cs`, so no socket is opened and no certificate is
@@ -718,11 +823,43 @@ our own CPU load is subtracted, not mistaken for a user
 a CPU service does not wait out a GPU cooldown
 a 6.5 GiB job is not started on a machine with 2 GiB spare
 the shipped caps are the ones that were measured
+a game takes the card and leaves the processor
+a compile takes the processor and leaves the card
+a busy nobody can explain is still the busy row
+the cooldown remembers which resource was contended
+a job wound down to zero is clamped, not uncapped
+a grid that inverts the ladder is repaired, not obeyed
+a fixture with no CPU columns still gives its old verdict
+an absent memory column is not zero memory
+the shipped example and the built-in defaults are the same machine
 ```
 
-Fixtures are twelve generated CSVs plus **two real recordings** from the test
+That last one is worth its own note, because it caught a defect that had been
+live in three files at once and that no amount of reading would have found. The
+GPU column of the light-use row shipped three ways: the built-in defaults said
+no, `worker.ini.example` said yes, and `Policy.CanRunGpu`'s docstring promised
+yes. Each was defensible on its own, they lived in different files, and a machine
+using the example file behaved differently from one using the defaults, silently.
+The test loads the shipped example and compares it against the shipped defaults,
+cell by cell.
+
+Fixtures are sixteen generated CSVs plus **two real recordings** from the test
 machine. `tests/gen_fixtures.py` is where the line between measured and synthetic
 is drawn, in its docstring.
+
+### The pipe between the two halves
+
+```bash
+python3 -m unittest discover -s services/tests
+```
+
+Six more, in Python, and they need no torch, no GPU, no agent and no network.
+The agent talks to a controller down one pipe, and that pipe now carries two
+verbs rather than one: `YIELD` to stop, and `THREADS n` when the cap moves. It is
+the only place the C# half and the Python half have to agree on a wire format,
+and the 400 tests above cannot reach it. A change on either side that stopped the
+other hearing it would show up as "the cap moved and the job did not", which
+reads as a kernel problem and is not one.
 
 ---
 
@@ -741,13 +878,14 @@ src/            the agent. C# 5, built by the csc.exe inside Windows
   Jobs.cs         the directory queue and the content-addressed asset store
   Install.cs      opting in: the three states, disk cost, reclaiming
   Cli.cs          the client
-  TrayApp.cs      the icon, the Why submenu and the four named rungs
+  TrayApp.cs      the icon, the Why submenu, the postures and the named rungs
   SettingsForm.cs the whole matrix, seen at once
 services/       one directory per service. NONE is installed by default
   lib/            the directory protocol, written once, for Python controllers
   echo/           needs no GPU. Install this first
-  chatterbox/     speech. About 6.3 GB
-tests/          261 assertions, no network, no GPU, no console session
+  chatterbox/     speech, on the card or on the processor. About 6.3 GB
+  tests/          the stdin protocol, which is the one thing both halves share
+tests/          400 assertions, no network, no GPU, no console session
 tools/          loadgen and a fake job, for exercising the yield path
 probe/          ten probes that produced every number in this README and in
                 docs/CPU-LIMITS.md. p8, p9, p10 and p11 are the CPU and memory ones

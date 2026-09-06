@@ -59,6 +59,12 @@ namespace IdleGpu
         DateTime _lastWanted = DateTime.MinValue;
         MachineState _worstRecent = MachineState.Busy;
         DateTime _worstRecentAt = DateTime.MinValue;
+        // The ratchet has to remember WHY it is holding, not only how hard. If it
+        // held Busy for ninety seconds while forgetting that the Busy was a game,
+        // the per-resource fallback would look at a clear sample, find nothing
+        // contended, and quietly hand back the row the cooldown exists to withhold.
+        bool _worstGpuContended = true;
+        bool _worstCpuContended = true;
         DateTime _now = DateTime.MinValue;
         WorkerState _state = WorkerState.Blocked;
 
@@ -159,6 +165,52 @@ namespace IdleGpu
                 ? "signed in and using the machine"
                 : "signed in, and this agent cannot measure input idle time from its session";
             return MachineState.LightUse;
+        }
+
+        /// The row, after the Busy state has been split by resource.
+        ///
+        /// THE CASE THIS EXISTS FOR, in the owner's words: a game takes the GPU
+        /// while leaving twelve threads idle, and a compile takes the CPU while
+        /// the card sits at five per cent. Selling the two independently is the
+        /// point of doing any of this, and a single Busy row that zeroes both
+        /// columns makes it impossible - the runner stops speech work on sixteen
+        /// idle threads because somebody opened Counter-Strike.
+        ///
+        /// So when the state is Busy, an UNCONTENDED resource takes its fields
+        /// from LightUse. Not from Idle and not from Locked: a tier 1 veto is the
+        /// strongest evidence this program has that a person is at the machine,
+        /// stronger than the session signals, because a full-screen game leaves
+        /// GetLastInputInfo idle while somebody plays it with a controller.
+        /// LightUse is the row for "somebody is here", and that is exactly what
+        /// has been established.
+        ///
+        /// THE ADMISSION FIELDS FOLLOW THE CPU. MinFreeMib and Admit are about
+        /// system memory and about starting new work, and system memory is the
+        /// CPU side's resource - the GPU has its own veto on VRAM in tier 1. A
+        /// game therefore does not stop the runner admitting a CPU job, and a
+        /// compile does.
+        ///
+        /// FAIL CLOSED. Both flags clear means nothing explained the Busy, and an
+        /// unexplained Busy gets the whole Busy row.
+        ResourceLimits ResolveLimits(MachineState st, bool gpuContended, bool cpuContended)
+        {
+            ResourceLimits row = _c.LimitsFor(st);
+            if (st != MachineState.Busy) return row;
+            if (gpuContended && cpuContended) return row;
+            if (!gpuContended && !cpuContended) return row;
+
+            ResourceLimits light = _c.LimitsFor(MachineState.LightUse);
+            ResourceLimits m = row.Clone();
+            if (!gpuContended) m.Gpu = light.Gpu;
+            if (!cpuContended)
+            {
+                m.CpuPct = light.CpuPct;
+                m.Priority = light.Priority;
+                m.WorkingSetMib = light.WorkingSetMib;
+                m.MinFreeMib = light.MinFreeMib;
+                m.Admit = light.Admit;
+            }
+            return m;
         }
 
         public Verdict Evaluate(Snapshot s)
@@ -371,6 +423,21 @@ namespace IdleGpu
 
             bool cpuBusy = _cpuBusyStreak >= _c.BusyConfirmSamples;
 
+            // --- which resource is contended -----------------------------------
+            //
+            // A tier 1 veto is GPU evidence: Steam's running app id, the anti-cheat
+            // service, a named game process, a foreign process holding VRAM, a
+            // full-screen foreground window. Only two of those plausibly want the
+            // processor as well, and a modern title that does still leaves half a
+            // sixteen thread machine idle, so none of them closes the CPU column on
+            // its own. The GPU tier 2 streak is the same kind of evidence, weaker.
+            //
+            // Blindness contends EVERYTHING. When the agent cannot see the owner it
+            // is not entitled to an opinion about either resource.
+            bool gpuContended = v.IsVeto || v.WantsGpu;
+            bool cpuContended = cpuBusy;
+            if (v.Blind) { gpuContended = true; cpuContended = true; }
+
             // --- which row of the matrix ---------------------------------------
 
             string stateWhy;
@@ -379,6 +446,14 @@ namespace IdleGpu
             {
                 now = MachineState.Busy;
                 stateWhy = "somebody else is using this machine's CPU";
+            }
+            // A Busy that no signal explains is a Busy nobody can price. Classify
+            // also returns Busy for a missing session block, which is neither a
+            // game nor a compile; treat it as both, because it is blindness by
+            // another name.
+            if (now == MachineState.Busy && !gpuContended && !cpuContended)
+            {
+                gpuContended = true; cpuContended = true;
             }
 
             // RESTRICT INSTANTLY, RELAX SLOWLY, on the same clock as the GPU's
@@ -390,15 +465,27 @@ namespace IdleGpu
             if (_worstRecentAt == DateTime.MinValue || now >= _worstRecent)
             {
                 _worstRecent = now; _worstRecentAt = s.At;
+                _worstGpuContended = gpuContended; _worstCpuContended = cpuContended;
             }
             else if ((s.At - _worstRecentAt).TotalSeconds >= _c.ClearCooldownSeconds)
             {
                 _worstRecent = now; _worstRecentAt = s.At;
+                _worstGpuContended = gpuContended; _worstCpuContended = cpuContended;
             }
             MachineState effective = now >= _worstRecent ? now : _worstRecent;
+            if (effective > now)
+            {
+                // Holding a worse row than this sample deserves. Carry the reason
+                // with it, or the fallback below would read a clear sample and
+                // reopen the column the cooldown is there to keep shut.
+                gpuContended = gpuContended || _worstGpuContended;
+                cpuContended = cpuContended || _worstCpuContended;
+            }
 
             v.MachineState = effective;
-            v.Limits = _c.LimitsFor(effective);
+            v.GpuContended = gpuContended;
+            v.CpuContended = cpuContended;
+            v.Limits = ResolveLimits(effective, gpuContended, cpuContended);
             v.StateReason = effective == now
                 ? stateWhy
                 : stateWhy + "; holding " + Config.StateLabel(effective).ToLowerInvariant()
@@ -455,6 +542,24 @@ namespace IdleGpu
             if (mode == Mode.Off) return false;
             if (mode == Mode.AlwaysOn) return true;
             return Last.Limits != null && Last.Limits.CpuPct > 0;
+        }
+
+        /// May a NEW job start, as opposed to may a running one continue.
+        ///
+        /// TWO QUESTIONS, NOT ONE, and conflating them is what makes a CPU
+        /// limiter feel like a killer. A running job has already paid for itself:
+        /// on this workload that is a 22 second model load and 4.7 GiB of
+        /// allocation, and throttling it to a trickle costs the owner almost
+        /// nothing while keeping all of that warm. Starting a NEW one on a machine
+        /// somebody is using costs them the load, the allocation and the memory
+        /// for as long as it runs. So the Busy row keeps the warm job and admits
+        /// nothing, which MinFreeMib could only have expressed as a number so
+        /// large it would have been a lie about memory.
+        public bool AdmitsNewWork(Mode mode)
+        {
+            if (mode == Mode.Off) return false;
+            if (mode == Mode.AlwaysOn) return true;
+            return Last.Limits == null || Last.Limits.Admit;
         }
 
         /// True when the user's chosen mode is running a job that the detector

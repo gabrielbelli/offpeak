@@ -56,6 +56,32 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 YIELD = threading.Event()
 _LOG_LOCK = threading.Lock()
 
+# HOW MANY THREADS THE AGENT WANTS THIS JOB TO SPREAD ITSELF OVER.
+#
+# The cap the agent applies is a kernel hard cap on the job object: once the job
+# has spent its share of a scheduling interval, nothing in it runs until the next
+# one. That binds in about 200 ms whatever the job is doing, and it is the
+# promise. This is the OPTIMISATION beside it, and the two are deliberately not
+# the same mechanism.
+#
+# Sixteen threads inside a tenth of a machine finish no sooner than two and evict
+# far more of the owner's cache on the way, so when the agent's cap moves the
+# thread count should move with it. It cannot be an environment variable: those
+# are frozen at process start, so a job that came up while nobody was signed in
+# would keep a thread per core after the owner sat down. It arrives as a line on
+# the stdin that already carries YIELD.
+#
+# APPLIED BETWEEN UNITS OF WORK, never during one. torch's thread pool cannot be
+# resized in the middle of a generate(), so this is a request the handler picks
+# up when it is safe, exactly like the yield flag.
+CPU_THREADS = [0]
+_THREADS_SEEN = threading.Event()
+
+
+def wanted_threads():
+    """The most recent thread count the agent asked for, or 0 for 'unchanged'."""
+    return CPU_THREADS[0] if _THREADS_SEEN.is_set() else 0
+
 
 def log(msg, **kw):
     """One JSON object per line on stderr.
@@ -72,13 +98,25 @@ def log(msg, **kw):
 
 
 def watch_stdin():
-    """A YIELD line means stop. End of input means the agent is gone."""
+    """A YIELD line means stop. End of input means the agent is gone.
+
+    A THREADS line means the cap moved. Anything else is ignored rather than
+    fatal, because a newer agent talking to an older controller must degrade to
+    the behaviour that controller already had rather than killing it.
+    """
     try:
         for line in sys.stdin:
-            if line.strip().upper() == "YIELD":
+            word = line.strip()
+            if word.upper() == "YIELD":
                 log("yield requested by the agent")
                 YIELD.set()
                 return
+            if word.upper().startswith("THREADS"):
+                parts = word.split()
+                if len(parts) == 2 and parts[1].isdigit() and int(parts[1]) > 0:
+                    CPU_THREADS[0] = int(parts[1])
+                    _THREADS_SEEN.set()
+                    log("thread count requested by the agent", threads=CPU_THREADS[0])
     except Exception as exc:                       # pragma: no cover - pipe teardown
         log("stdin watcher error", error=str(exc))
     log("stdin closed; the agent is gone")

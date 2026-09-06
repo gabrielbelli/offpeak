@@ -146,6 +146,9 @@ class Runtime:
         self.load_seconds = None
         self.vram_mib = 0
         self.rss_mib = 0
+        # What torch has actually been told, so a THREADS line that changes
+        # nothing does not churn the thread pool between every segment.
+        self.threads = 0
 
     def load(self):
         t0 = time.monotonic()
@@ -190,6 +193,7 @@ class Runtime:
             n = os.getenv("IDLEGPU_CPU_THREADS", "").strip()
             if n.isdigit() and int(n) > 0:
                 torch.set_num_threads(int(n))
+                self.threads = int(n)
                 svc.log("cpu threads", threads=int(n))
 
         if self.resolved == "cuda":
@@ -238,8 +242,36 @@ class Runtime:
         svc.log("model ready", load_seconds=round(self.load_seconds, 3),
                 vram_used_mib=self.vram_mib, sample_rate=self.sample_rate)
 
+    def _retune(self):
+        """Take the agent's latest thread count, BETWEEN units of work.
+
+        The cap the agent applies is a kernel hard cap and it binds in about
+        200 ms whatever this process is doing; that is the promise and it does
+        not depend on this method existing. This is the optimisation beside it:
+        sixteen threads inside a tenth of a machine finish no sooner than two and
+        evict far more of the owner's cache, so when the cap moves the thread
+        count should move with it.
+
+        NEVER DURING A generate(). torch's intra-op pool cannot be resized in the
+        middle of a parallel region, so this is called at the top of a segment,
+        exactly where the yield flag is checked and for the same reason.
+        """
+        if self.resolved != "cpu":
+            return
+        want = svc.wanted_threads()
+        if want <= 0 or want == self.threads:
+            return
+        try:
+            import torch
+            torch.set_num_threads(want)
+            self.threads = want
+            svc.log("cpu threads changed", threads=want)
+        except Exception as exc:
+            svc.log("could not change the thread count", error=str(exc))
+
     def speak(self, text, params):
         import numpy as np
+        self._retune()
         t0 = time.monotonic()
         wav = self.model.generate(
             text,

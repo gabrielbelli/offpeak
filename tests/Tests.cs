@@ -25,11 +25,19 @@ namespace IdleGpu
     {
         static int _failed, _passed;
         static string _fixtures;
+        static string _fixtureRoot;
 
         static void Main(string[] args)
         {
             _fixtures = args.Length > 0 ? args[0]
                 : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fixtures");
+            _fixtureRoot = _fixtures;
+
+            TheExampleFileAndTheBuiltInDefaultsAgree();
+            AFixtureWithoutCpuColumnsStillGivesItsOldVerdict();
+            AMemoryColumnThatIsAbsentIsNotZeroMemory();
+            OurOwnCpuLoadIsSubtractedNotSuppressed();
+            AnAdmissionRefusalIsQueuedNotFailed();
 
             IdleDesktopEventuallyRunsJobs();
             IdleDesktopNeverLooksBusy();
@@ -76,8 +84,17 @@ namespace IdleGpu
             AnUnmeasurableIdleTimeIsNeverIdle();
             ARowNobodyConfiguredTakesNothing();
             AZeroCpuCapMeansStopBecauseWindowsHasNoZeroCap();
+            AJobBeingStoppedIsNotUncappedOnTheWayOut();
+            AGridThatInvertsTheLadderIsRepairedNotObeyed();
+            AProfileDoesNotDependOnWhereItSitsInTheFile();
+            ASavedProfileComesBackWithItsName();
+            AdmitIsSeparateFromTheCap();
+            ThreadCountFollowsTheCapAndStopsAtPhysicalCores();
             OurOwnCpuIsNotSomebodyElseUsingTheMachine();
-            AGameStopsCpuWorkToo();
+            AGameOnTheCardDoesNotStopTheProcessor();
+            ACompileDoesNotStopTheCard();
+            AnUnexplainedBusyGetsTheWholeBusyRow();
+            TheCooldownRemembersWhichResourceWasContended();
             TheLadderTightensAtOnceAndLoosensOnTheCooldown();
             ACpuServiceDoesNotWaitOutAGpuCooldown();
             AnUnknownPriorityBecomesIdleNotNormal();
@@ -759,6 +776,106 @@ namespace IdleGpu
             finally { Nuke(root); }
         }
 
+        /// THE DEFECT THIS PREVENTS, AND IT WAS LIVE IN THREE PLACES AT ONCE.
+        ///
+        /// The GPU column of the light-use row was shipped three ways and no two
+        /// agreed. Config.DefaultLimits returned Gpu = false; worker.ini.example
+        /// shipped `limits.lightuse.gpu = yes`; Policy.CanRunGpu's docstring
+        /// promised the column ships as yes in every row but Busy so that
+        /// installing the release changed nobody's behaviour. So a machine using
+        /// the example file behaved differently from one using the built-in
+        /// defaults, silently, and the documentation described neither.
+        ///
+        /// Nothing catches that by reading, because the three live in different
+        /// files and each is defensible on its own. This does: the shipped example
+        /// is loaded and compared against the shipped defaults, cell by cell.
+        ///
+        /// If this fails, ONE of the two is wrong and the fix is to decide which
+        /// rather than to relax the assertion.
+        static void TheExampleFileAndTheBuiltInDefaultsAgree()
+        {
+            Case("the shipped example and the built-in defaults are the same machine");
+            string example = FindExample();
+            if (example == null)
+            {
+                Ok(true, "worker.ini.example is not beside the tests; skipped");
+                return;
+            }
+            string root = TempDir();
+            try
+            {
+                // Copied so the load cannot touch the real file, and given a
+                // DataDir so nothing resolves into the user's profile.
+                string ini = Path.Combine(root, "worker.ini");
+                var lines = new List<string>(File.ReadAllLines(example));
+                lines.Insert(0, "DataDir = " + root);
+                File.WriteAllLines(ini, lines.ToArray());
+
+                Config c = Config.Load(ini);
+                Ok(c.GridRepairs.Count == 0,
+                    "the shipped example is monotone and needs no repair"
+                    + (c.GridRepairs.Count > 0 ? ": " + c.GridRepairs[0] : ""));
+                Ok(c.EffectiveProfile() == Config.ProfileBalanced,
+                    "and it is exactly the balanced posture, not a custom one (got "
+                    + c.EffectiveProfile() + ")");
+
+                var built = new Config();
+                foreach (MachineState st in Config.AllStates())
+                {
+                    ResourceLimits a = c.LimitsFor(st);
+                    ResourceLimits b = built.LimitsFor(st);
+                    Ok(a.SameAs(b), Config.StateLabel(st) + " matches: example says "
+                        + a.Describe() + ", the built-in default says " + b.Describe());
+                }
+                Ok(c.IdleAfterSeconds == built.IdleAfterSeconds, "IdleAfterSeconds agrees");
+                Ok(c.ForeignCpuBusyPct == built.ForeignCpuBusyPct, "ForeignCpuBusyPct agrees");
+
+                // And the two speech services really are one on each device, so
+                // the per-device scheduler gate has two groups to put them in.
+                ServiceDef gpu = c.Service("chatterbox");
+                ServiceDef cpu = c.Service("chatterbox-cpu");
+                Ok(gpu != null && cpu != null, "the example declares both speech services");
+                if (gpu != null && cpu != null)
+                {
+                    Ok(gpu.WantsGpu, "chatterbox waits for the card");
+                    Ok(!cpu.WantsGpu, "chatterbox-cpu does not");
+                    Ok(cpu.NeedsMemoryMib > 0,
+                        "and the CPU one declares what it needs resident, for the admission check");
+                    Ok(cpu.Arguments.IndexOf("--device cpu", StringComparison.Ordinal) >= 0,
+                        "and names its device rather than letting auto resolve to cuda");
+                }
+            }
+            finally { Nuke(root); }
+        }
+
+        /// The example lives beside the tests in the repository and nowhere near
+        /// them in an install, so it is looked for rather than assumed.
+        static string FindExample()
+        {
+            string here = AppDomain.CurrentDomain.BaseDirectory;
+            var tried = new List<string>();
+            string dir = here;
+            for (int i = 0; i < 6 && dir != null; i++)
+            {
+                tried.Add(Path.Combine(dir, "worker.ini.example"));
+                dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
+            }
+            // The fixtures directory is passed on the command line, so the
+            // repository root is two levels above it whatever the build did.
+            if (_fixtureRoot != null)
+            {
+                string up = Path.GetDirectoryName(_fixtureRoot.TrimEnd(Path.DirectorySeparatorChar));
+                if (up != null)
+                {
+                    tried.Add(Path.Combine(up, "worker.ini.example"));
+                    string up2 = Path.GetDirectoryName(up.TrimEnd(Path.DirectorySeparatorChar));
+                    if (up2 != null) tried.Add(Path.Combine(up2, "worker.ini.example"));
+                }
+            }
+            foreach (string p in tried) if (File.Exists(p)) return p;
+            return null;
+        }
+
         /// THE DEFECT THIS PREVENTS: a worker.ini.example nobody can use unedited.
         /// Every path a service needs is under the user's own profile, so a literal
         /// path in the shipped example is THIS machine's path and wrong on every
@@ -1040,6 +1157,439 @@ namespace IdleGpu
                 "the same 600 s reported by the logon helper IS idle (got " + w.MachineState + ")");
         }
 
+        /// THE REGRESSION GUARD ON THE WHOLE FIXTURE-COMPATIBILITY ARGUMENT, and
+        /// it was written before the columns were added rather than after.
+        ///
+        /// Replay.Load builds a header-to-index map from row 0 and Get() returns
+        /// "" for a column that is not there, so ADDING names to the header cannot
+        /// break a read. The danger is never the read; it is the DEFAULT'S
+        /// MEANING. Every fixture in this directory was recorded before the
+        /// processor was something this runner sold, and none of them says
+        /// anything about it. If a missing cpu_total_pct read as an idle
+        /// processor, that would be a measurement in the record that was never
+        /// taken - and the next person to add a column would copy the pattern.
+        ///
+        /// So every existing fixture must still produce exactly the verdict it
+        /// produced before, and this checks all of them rather than a chosen one.
+        static void AFixtureWithoutCpuColumnsStillGivesItsOldVerdict()
+        {
+            Case("a fixture with no CPU columns still gives its old verdict");
+            string[] files = Directory.GetFiles(_fixtures, "*.csv");
+            Ok(files.Length > 0, "there are fixtures to check (" + files.Length + ")");
+            int old = 0, withCpu = 0, checkedRows = 0;
+            foreach (string f in files)
+            {
+                List<Snapshot> rows = Replay.Load(f);
+                if (rows.Count == 0) continue;
+                string name = Path.GetFileName(f);
+                bool anyCpu = false, anyMem = false;
+                foreach (Snapshot s in rows)
+                {
+                    if (s.Cpu != null && s.Cpu.Valid) anyCpu = true;
+                    if (s.Memory != null && s.Memory.Valid) anyMem = true;
+                }
+                if (anyCpu) { withCpu++; Ok(anyMem, name + ": records both new columns or neither"); continue; }
+                Ok(!anyMem, name + ": memory is unmeasured, not zero");
+                old++;
+                checkedRows += rows.Count;
+
+                // And the policy really does skip the CPU tier on it, so a GPU-only
+                // recording cannot acquire a reason about the processor that it
+                // never recorded.
+                var p = new Policy(new Config());
+                foreach (Snapshot s in rows)
+                {
+                    Verdict v = p.Evaluate(s);
+                    if (v.ReasonText.IndexOf("somebody else's work", StringComparison.Ordinal) >= 0)
+                    {
+                        Ok(false, name + " grew a CPU reason it never recorded");
+                        return;
+                    }
+                }
+            }
+            Ok(old > 0, old + " fixtures predate the processor columns, over "
+                + checkedRows + " recorded samples");
+            Ok(withCpu > 0, withCpu + " newer fixtures do carry them, so both paths are exercised");
+            Ok(true, "and no older fixture grew a CPU reason it never recorded");
+        }
+
+        /// THE SAME DEFECT THE GPU HAS, ON THE SIDE THAT CAN ACTUALLY FIX IT.
+        ///
+        /// A whole-machine load reading has no owner attached to it, so the moment
+        /// our own controller starts, the agent reads the load IT created as
+        /// somebody else at the machine and yields to itself. Measured on the GPU:
+        /// four restarts in a row on a locked desktop with nobody near it. The GPU
+        /// could only paper over that by SUPPRESSING its load votes while a job
+        /// runs, because nvidia-smi reports [N/A] for per-process memory on this
+        /// machine and there is no way to attribute utilisation to a process.
+        ///
+        /// The CPU does not have to make that trade. A job object accounts for its
+        /// own processes exactly, so the load is SUBTRACTED rather than muted, and
+        /// the signal keeps working WHILE a job runs - which is precisely when it
+        /// matters, because that is when the owner comes back.
+        ///
+        /// Replayed from recorded columns rather than hand-built snapshots, so the
+        /// arithmetic in Replay.Load is exercised too.
+        static void OurOwnCpuLoadIsSubtractedNotSuppressed()
+        {
+            Case("our own CPU load is subtracted, not suppressed");
+
+            // The machine at 92.7 per cent, and 92.4 of it is inside our job.
+            var p = new Policy(new Config());
+            Verdict v = null;
+            List<Snapshot> ours = Replay.Load(Path.Combine(_fixtures, "cpu_own_job_is_the_load.csv"));
+            Ok(ours.Count > 0, "the fixture loads (" + ours.Count + " samples)");
+            foreach (Snapshot s in ours) v = p.Evaluate(s);
+            Ok(ours[0].Cpu.MachinePct > 90, "the machine really is flat out");
+            Ok(ours[0].Cpu.ForeignPct < 1,
+                "and almost none of it is somebody else's (got " + ours[0].Cpu.ForeignPct + ")");
+            Ok(v.MachineState != MachineState.Busy,
+                "so twenty seconds of our own load never reads as a user (got " + v.MachineState + ")");
+            Ok(!v.CpuContended, "and the processor is not marked contended");
+            Ok(v.ReasonText.IndexOf("somebody else's work", StringComparison.Ordinal) < 0,
+                "and no reason blames a person: " + v.ReasonText);
+
+            // Somebody else's compile, on a card nobody is touching.
+            var p2 = new Policy(new Config());
+            Verdict v2 = null;
+            foreach (Snapshot s in Replay.Load(Path.Combine(_fixtures, "cpu_busy_compile.csv")))
+                v2 = p2.Evaluate(s);
+            Ok(v2.MachineState == MachineState.Busy,
+                "somebody else's compile does read as busy (got " + v2.MachineState + ")");
+            Ok(v2.CpuContended, "with the processor contended");
+            Ok(!v2.GpuContended, "and the card left alone");
+            Ok(p2.CanRunGpu(Mode.Auto) || p2.State != WorkerState.Available,
+                "so the GPU column is not closed by a compile");
+
+            // A job of ours running while somebody else does something small. 94
+            // per cent of the machine, but only 22 of it is theirs, which is under
+            // the trip point - so the job carries on rather than yielding to a
+            // number it is mostly responsible for itself.
+            var p3 = new Policy(new Config());
+            Verdict v3 = null;
+            List<Snapshot> mixed = Replay.Load(Path.Combine(_fixtures, "cpu_mostly_ours.csv"));
+            foreach (Snapshot s in mixed) v3 = p3.Evaluate(s);
+            Ok(mixed[0].Cpu.MachinePct > 90, "the machine is flat out again");
+            Ok(mixed[0].Cpu.ForeignPct > 20 && mixed[0].Cpu.ForeignPct < 25,
+                "and 22 per cent of it is theirs (got " + mixed[0].Cpu.ForeignPct + ")");
+            Ok(v3.MachineState != MachineState.Busy,
+                "which is under the trip point, so the job carries on (got " + v3.MachineState + ")");
+        }
+
+        /// A REFUSAL IS A WAIT, NOT A FAILURE. A job the runner will not start yet
+        /// stays queued and is tried again on the next tick; it is never failed
+        /// back to the caller, because "not right now" is not "never" and the
+        /// caller cannot tell the difference from a rejection.
+        static void AnAdmissionRefusalIsQueuedNotFailed()
+        {
+            Case("a memory refusal is a wait, not a failure");
+            List<Snapshot> rows = Replay.Load(Path.Combine(_fixtures, "memory_pressure.csv"));
+            Ok(rows.Count > 0, "the fixture loads");
+            Snapshot s = rows[0];
+            Ok(s.Memory.Valid, "memory is measured");
+            Ok(s.Memory.AvailableMib < 2048,
+                "and the machine has almost nothing free (" + s.Memory.AvailableMib + " MiB)");
+
+            var c = new Config();
+            var p = new Policy(c);
+            Verdict v = null;
+            foreach (Snapshot one in rows) v = p.Evaluate(one);
+
+            // The policy's own verdict is unaffected: memory is an admission
+            // threshold and not a veto. Every idle Windows desktop has half its
+            // memory in use, and a veto on that would never clear.
+            Ok(v.MachineState != MachineState.Busy,
+                "low memory is not itself evidence of a user (got " + v.MachineState + ")");
+            Ok(p.CanRunCpu(Mode.Auto), "so a job already running is not stopped for it");
+
+            // But a NEW one is not started.
+            string why;
+            Ok(!Policy.MemoryAllows(s.Memory.AvailableMib, s.Memory.Valid,
+                                    v.Limits.MinFreeMib, 7168, out why),
+                "while a new 7 GiB job is refused: " + why);
+            Ok(why.Length > 0, "and the refusal says why, which is what makes it a wait");
+        }
+
+        /// AN ABSENT MEMORY COLUMN IS NOT ZERO MEMORY, and this is the one where
+        /// getting the default wrong would have been catastrophic rather than
+        /// merely dishonest.
+        ///
+        /// mem_avail_mib defaulting to 0 does not mean "we did not look", it means
+        /// ZERO BYTES FREE. Policy.MemoryAllows would then have refused admission
+        /// on every fixture recorded before the column existed: each would have
+        /// kept its policy verdict, passed every existing test, and silently
+        /// stopped being able to start a job.
+        ///
+        /// The rule is the opposite of the one tier 0 uses for the user, and both
+        /// reasons belong in the docstrings because the next person to add a
+        /// signal will pick one of them by pattern-matching. Blindness about the
+        /// USER fails closed: being wrong costs somebody their match. Blindness
+        /// about FREE MEMORY fails open: being wrong costs a runner that never
+        /// starts anything, on a machine whose counter is simply unavailable.
+        static void AMemoryColumnThatIsAbsentIsNotZeroMemory()
+        {
+            Case("an absent memory column is not zero memory");
+            string why;
+
+            // Absent. Fails OPEN.
+            Ok(Policy.MemoryAllows(0, false, 6144, 5120, out why),
+                "unmeasured memory admits the job rather than refusing for ever");
+            Ok(why.Length == 0, "and says nothing, because there is nothing to report");
+
+            // Present and genuinely low. Fails CLOSED, with a reason a person can read.
+            Ok(!Policy.MemoryAllows(2048, true, 6144, 5120, out why),
+                "2 GiB free against an 11 GiB reservation refuses");
+            Ok(why.IndexOf("2,048", StringComparison.Ordinal) >= 0
+               || why.IndexOf("2048", StringComparison.Ordinal) >= 0,
+                "and names the number: " + why);
+
+            // Present and ample.
+            Ok(Policy.MemoryAllows(24000, true, 6144, 5120, out why), "24 GiB free admits it");
+
+            // A row that asks for no headroom never refuses, whatever is free,
+            // because MinFreeMib of zero means "start regardless" and not "start
+            // when there is nothing left".
+            Ok(Policy.MemoryAllows(1, true, 0, 5120, out why),
+                "a row with no headroom rule starts regardless");
+
+            // And the round trip through a real fixture-shaped file: present and
+            // low really does refuse, so the column is wired up and not merely
+            // parsed.
+            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-mem-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string csv = Path.Combine(dir, "low.csv");
+                File.WriteAllLines(csv, new string[] {
+                    "iso_time,gpu_healthy,console_user,locked,own_session,console_session,mem_total_mib,mem_avail_mib",
+                    "2026-09-06T12:00:00.0000000Z,1,,0,1,1,32670,1500",
+                });
+                List<Snapshot> rows = Replay.Load(csv);
+                Ok(rows.Count == 1, "the fixture loads");
+                Ok(rows[0].Memory.Valid, "and its memory column is measured");
+                Ok(rows[0].Memory.AvailableMib == 1500,
+                    "with the number it recorded (got " + rows[0].Memory.AvailableMib + ")");
+                Ok(!Policy.MemoryAllows(rows[0].Memory.AvailableMib, rows[0].Memory.Valid,
+                                        6144, 5120, out why),
+                    "and a job that needs headroom is not started on it");
+            }
+            finally { Nuke(dir); }
+        }
+
+        /// THE RATCHET ASSUMES SOMETHING NOTHING CHECKED.
+        ///
+        /// Policy.Evaluate holds the worst MachineState seen inside ninety seconds
+        /// and then looks its row up, which takes for granted that a worse state
+        /// has a smaller row. A grid where Busy is more generous than LightUse -
+        /// one hand edit, one mistyped spinner, one saved custom posture - would
+        /// invert the ratchet and hand the job MORE machine at the moment the owner
+        /// sat down, which is the exact opposite of the only promise this program
+        /// makes.
+        ///
+        /// REPAIRED, NOT REFUSED. Somebody who mistypes a number must not end up
+        /// with an agent that will not start.
+        static void AGridThatInvertsTheLadderIsRepairedNotObeyed()
+        {
+            Case("a grid that inverts the ladder is repaired, not obeyed");
+            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-mono-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string ini = Path.Combine(dir, "worker.ini");
+                File.WriteAllLines(ini, new string[] {
+                    "[limits]",
+                    "limits.lightuse.cpupct = 90",     // looser than idle's 50
+                    "limits.busy.cpupct = 100",        // looser than everything
+                    "limits.busy.gpu = yes",
+                    "limits.busy.admit = yes",
+                });
+                Config c = Config.Load(ini);
+                Ok(c.LimitsFor(MachineState.LightUse).CpuPct
+                   <= c.LimitsFor(MachineState.Idle).CpuPct,
+                   "light use is no more generous than idle (got "
+                   + c.LimitsFor(MachineState.LightUse).CpuPct + " against "
+                   + c.LimitsFor(MachineState.Idle).CpuPct + ")");
+                Ok(c.LimitsFor(MachineState.Busy).CpuPct
+                   <= c.LimitsFor(MachineState.LightUse).CpuPct,
+                   "and busy is no more generous than light use");
+                Ok(c.GridRepairs.Count > 0, "and the repair is reported rather than silent");
+
+                // Every row of every shipped profile is already monotone, so the
+                // repair never fires on a machine nobody has edited.
+                foreach (string id in Config.ProfileIds())
+                {
+                    var fresh = new Config();
+                    fresh.ApplyProfile(id);
+                    Ok(fresh.TightenGrid().Count == 0,
+                        "the " + id + " profile is monotone as shipped");
+                }
+            }
+            finally { Nuke(dir); }
+        }
+
+        /// A SEED IS NOT A MEASUREMENT AND A NAME IS NOT A NUMBER.
+        ///
+        /// A profile fills every cell; a limits.<state>.<field> line overrides one.
+        /// If both were applied in the order they were read, the same file would
+        /// mean two different things depending on whether the person happened to
+        /// type the profile line above or below the override. So the profile is
+        /// resolved first whatever the line order, and the effective posture reports
+        /// as "custom" the moment an override differs from it.
+        static void AProfileDoesNotDependOnWhereItSitsInTheFile()
+        {
+            Case("a profile does not depend on where it sits in the file");
+            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-prof-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string above = Path.Combine(dir, "above.ini");
+                File.WriteAllLines(above, new string[] {
+                    "Profile = generous",
+                    "limits.lightuse.cpupct = 15",
+                });
+                string below = Path.Combine(dir, "below.ini");
+                File.WriteAllLines(below, new string[] {
+                    "limits.lightuse.cpupct = 15",
+                    "Profile = generous",
+                });
+                Config a = Config.Load(above);
+                Config b = Config.Load(below);
+                Ok(a.LimitsFor(MachineState.LightUse).CpuPct == 15,
+                    "the override wins over the profile (got " + a.LimitsFor(MachineState.LightUse).CpuPct + ")");
+                Ok(b.LimitsFor(MachineState.LightUse).CpuPct == 15,
+                    "in either order (got " + b.LimitsFor(MachineState.LightUse).CpuPct + ")");
+                Ok(a.LimitsFor(MachineState.Busy).CpuPct == b.LimitsFor(MachineState.Busy).CpuPct,
+                    "and every other cell comes from the profile either way");
+                Ok(a.LimitsFor(MachineState.Busy).CpuPct
+                   == Config.ProfileLimits(Config.ProfileGenerous)[MachineState.Busy].CpuPct,
+                    "which is the generous profile's busy row, not the balanced one");
+                Ok(a.EffectiveProfile() == "custom",
+                    "an edited cell reports as custom, not as generous");
+                Ok(a.EffectiveProfileLabel().IndexOf("Generous", StringComparison.Ordinal) >= 0,
+                    "and says which posture it is based on: " + a.EffectiveProfileLabel());
+
+                // Unedited, the name and the numbers agree and nothing says custom.
+                string clean = Path.Combine(dir, "clean.ini");
+                File.WriteAllLines(clean, new string[] { "Profile = away" });
+                Config d = Config.Load(clean);
+                Ok(d.EffectiveProfile() == Config.ProfileAway,
+                    "an untouched profile reports as itself (got " + d.EffectiveProfile() + ")");
+                Ok(d.LimitsFor(MachineState.LightUse).CpuPct == 0,
+                    "and 'only when I am away' really does mean nothing while somebody is here");
+                Ok(d.LimitsFor(MachineState.Locked).CpuPct == 100,
+                    "while still taking the whole machine when the desktop is locked");
+                Ok(d.IdleAfterSeconds == 300 && d.ForeignCpuBusyPct == 30.0,
+                    "and the profile carries its two tunings with it");
+            }
+            finally { Nuke(dir); }
+        }
+
+        /// WHAT A SAVED POSTURE IS FOR. Somebody who has priced their own machine
+        /// wants that back in the tray beside the three shipped ones, not typed
+        /// again. Same flat-key shape as [limits], because a second file format is
+        /// a second thing to get wrong at 2am.
+        static void ASavedProfileComesBackWithItsName()
+        {
+            Case("a saved posture comes back with its name");
+            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-saved-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string ini = Path.Combine(dir, "worker.ini");
+                File.WriteAllLines(ini, new string[] {
+                    "[profile.nightshift]",
+                    "profile.nightshift.name = Night shift",
+                    "profile.nightshift.lightuse.cpupct = 40",
+                    "profile.nightshift.busy.cpupct = 20",
+                    "Profile = nightshift",
+                });
+                Config c = Config.Load(ini);
+                Ok(c.SavedProfiles.ContainsKey("nightshift"), "the saved posture is parsed");
+                Ok(c.AnyProfileLabel("nightshift") == "Night shift",
+                    "under the name it was given (got " + c.AnyProfileLabel("nightshift") + ")");
+                Ok(c.LimitsFor(MachineState.LightUse).CpuPct == 40,
+                    "and it is in force (got " + c.LimitsFor(MachineState.LightUse).CpuPct + ")");
+                Ok(c.LimitsFor(MachineState.Busy).CpuPct == 20, "in every cell it names");
+                Ok(c.LimitsFor(MachineState.NobodyHome).CpuPct == 100,
+                    "and cells it does not name still describe a whole machine");
+                Ok(c.EffectiveProfile() == "nightshift",
+                    "and it reports as itself rather than as custom (got " + c.EffectiveProfile() + ")");
+            }
+            finally { Nuke(dir); }
+        }
+
+        /// KEEP THE WARM JOB, TAKE NO NEW ONES. A CPU yield throttles rather than
+        /// killing, so a job that has already paid its 22 second model load and
+        /// 4.7 GiB of allocation is worth holding at a trickle. Starting a NEW one
+        /// on a machine somebody is using is not. MinFreeMib could only have said
+        /// that with a number so large it would have been a lie about memory, which
+        /// is exactly why Admit is a field of its own.
+        static void AdmitIsSeparateFromTheCap()
+        {
+            Case("keeping a warm job is not the same as inviting a new one");
+            var c = new Config();
+            c.ApplyProfile(Config.ProfileGenerous);
+            var p = new Policy(c);
+            Snapshot s = Sn(true, false, true, true, 0, T0);
+            s.Launchers.GameProcesses.Add("somegame.exe");
+            // A game AND a compile: both resources contended, so the whole Busy row.
+            for (int i = 0; i < 3; i++)
+            {
+                s = Sn(true, false, true, true, 0, T0.AddSeconds(i));
+                s.Launchers.GameProcesses.Add("somegame.exe");
+                s.Cpu = new CpuSample();
+                s.Cpu.Valid = true;
+                s.Cpu.MachinePct = 99; s.Cpu.OwnPct = 0; s.Cpu.ForeignPct = 99;
+                p.Evaluate(s);
+            }
+            Ok(p.Last.MachineState == MachineState.Busy, "both resources are contended");
+            Ok(p.Last.Limits.CpuPct == 10,
+                "the generous profile keeps the warm job at ten per cent (got " + p.Last.Limits.CpuPct + ")");
+            Ok(p.CanRunCpu(Mode.Auto), "so a running CPU job is throttled rather than stopped");
+            Ok(!p.AdmitsNewWork(Mode.Auto), "but nothing new starts");
+            Ok(!c.LimitsFor(MachineState.Busy).Admit, "because the busy row admits nothing");
+            Ok(c.LimitsFor(MachineState.LightUse).Admit, "while light use still does");
+
+            // Always-on is the owner saying "use my machine anyway". It overrides
+            // admission the same way it overrides everything else.
+            Ok(p.AdmitsNewWork(Mode.AlwaysOn), "always-on admits work regardless");
+            Ok(!p.AdmitsNewWork(Mode.Off), "and off admits nothing regardless");
+        }
+
+        /// SIXTEEN THREADS INSIDE A TENTH OF A MACHINE IS THE WORST CONFIGURATION
+        /// A HARD CAP CAN BE GIVEN. Once the job has spent its share of a
+        /// scheduling interval no thread in it runs until the next one, so the
+        /// threads take turns being descheduled and thrash the owner's cache on the
+        /// way. The cap decides how much; this decides how thinly it is spread.
+        ///
+        /// AT ONE HUNDRED PER CENT THE ANSWER IS PHYSICAL CORES, not logical ones.
+        /// The NAS thread sweep on this same model: 0.077 realtime at 2 threads,
+        /// 0.230 at 8, 0.285 at 16 - per-thread efficiency halving from 2 to 16,
+        /// which is the signature of work bound by single-thread latency. Two
+        /// sibling threads on one core share the L1, the L2 and the front end, and
+        /// this model's whole advantage is a 96 MiB L3 it walks every token.
+        static void ThreadCountFollowsTheCapAndStopsAtPhysicalCores()
+        {
+            Case("the thread count follows the cap and stops at physical cores");
+            Ok(Config.ThreadsFor(Config.Rung(0), 16, 8) == 8,
+                "unlimited on 8 cores and 16 threads asks for 8, not 16 (got "
+                + Config.ThreadsFor(Config.Rung(0), 16, 8) + ")");
+            Ok(Config.ThreadsFor(Config.Rung(1), 16, 8) == 8, "fifty per cent of sixteen is eight");
+            Ok(Config.ThreadsFor(Config.Rung(2), 16, 8) == 2, "ten per cent of sixteen rounds to two");
+            Ok(Config.ThreadsFor(Config.Rung(3), 16, 8) == 0,
+                "and a row that means stop asks for nothing at all");
+
+            // DETECTED, NEVER ASSUMED. A stranger's machine is not sixteen threads.
+            Ok(Config.ThreadsFor(Config.Rung(0), 4, 4) == 4, "a four thread machine asks for four");
+            Ok(Config.ThreadsFor(Config.Rung(2), 4, 4) == 1,
+                "and ten per cent of four is one, never zero, because zero threads is no job");
+
+            // A machine whose topology cannot be read gets the behaviour it had
+            // before physical cores were detected at all, rather than a guess.
+            Ok(Config.ThreadsFor(Config.Rung(0), 16, 0) == 16,
+                "an unreadable core count falls back to the logical one");
+        }
+
         /// Missing configuration must never read as permission. A worker.ini with
         /// a typo in a state name used to be a state with no row, and a state with
         /// no row must take nothing rather than everything.
@@ -1057,18 +1607,57 @@ namespace IdleGpu
         /// zero cannot mean "capped to nothing" and has to mean "do not run". If
         /// somebody ever makes 0 mean "unlimited" to tidy the UI up, this is the
         /// test that stops it.
+        ///
+        /// WHAT CHANGED IN THIS TEST AND WHY. It used to reach the zero row by
+        /// starting a game, and asserted that a game therefore stopped CPU work.
+        /// That is no longer true and was never wanted: a game contends the CARD,
+        /// and the Busy row is now split by resource so an uncontended processor
+        /// falls back to the LightUse row. See AGameOnTheCardDoesNotStopTheProcessor.
+        /// The property this test is actually about - zero means stop - is asserted
+        /// directly on the row and on the kernel arithmetic instead, which is
+        /// stricter than going through a game to get at it.
         static void AZeroCpuCapMeansStopBecauseWindowsHasNoZeroCap()
         {
             Case("a CPU cap of zero means stop, not unlimited");
             var c = new Config();
+            Ok(c.LimitsFor(MachineState.Busy).CpuPct == 0, "the busy row ships as zero");
             var p = new Policy(c);
-            // A game running: the busiest row there is.
-            Snapshot s = Sn(true, false, true, true, 0, T0);
-            s.Launchers.GameProcesses.Add("somegame.exe");
+            // Blind: the one state where nothing at all is on offer, and the only
+            // way to reach a whole Busy row without naming a resource.
+            Snapshot s = Sn(true, false, false, false, 0, T0);
             Verdict v = p.Evaluate(s);
-            Ok(v.MachineState == MachineState.Busy, "a game is the busy row");
+            Ok(v.MachineState == MachineState.Busy, "blindness is the busy row");
             Ok(v.Limits.CpuPct == 0, "whose cap is zero");
             Ok(!p.CanRunCpu(Mode.Auto), "and zero means a CPU service may not run");
+        }
+
+        /// THE DEFECT: A JOB ON ITS WAY OUT USED TO BE UNCAPPED.
+        ///
+        /// The rate write was guarded by "CpuPct > 0 && CpuPct < 100", so a row of
+        /// zero fell through with a zeroed struct - and a zeroed ControlFlags
+        /// CLEARS the cap rather than setting it to nothing. Zero is the row a game
+        /// produces. So at the exact moment somebody started a game, the job that
+        /// was about to be stopped had its cap REMOVED and ran flat out for the
+        /// whole of YieldGraceSeconds while Stop() waited for it to exit politely.
+        ///
+        /// CpuRate = 0 is rejected by the kernel with INVALID_ARGS, measured, so
+        /// zero is not expressible and has to clamp to the smallest cap there is.
+        static void AJobBeingStoppedIsNotUncappedOnTheWayOut()
+        {
+            Case("a job wound down to zero is clamped, not uncapped");
+            uint flags, rate;
+            CpuRate.For(0, out flags, out rate);
+            Ok(flags == (CpuRate.Enable | CpuRate.HardCap),
+                "zero still writes a hard cap, because ControlFlags 0 would REMOVE the cap");
+            Ok(rate == 100, "clamped to one per cent, the smallest the kernel accepts (got " + rate + ")");
+
+            CpuRate.For(10, out flags, out rate);
+            Ok(flags == (CpuRate.Enable | CpuRate.HardCap), "ten per cent is a hard cap");
+            Ok(rate == 1000, "in hundredths of one per cent of the whole machine (got " + rate + ")");
+
+            CpuRate.For(100, out flags, out rate);
+            Ok(flags == 0, "one hundred per cent clears rate control entirely rather than ceiling at it");
+            Ok(rate == 0, "with nothing left in the struct");
         }
 
         /// THE DEFECT THE GPU HAS AND THE CPU MUST NOT. A whole-machine load
@@ -1124,21 +1713,144 @@ namespace IdleGpu
                 "the third consecutive sample carries (got " + v.MachineState + ")");
         }
 
-        /// A game takes the GPU and leaves twelve threads idle, which is the whole
-        /// argument for selling the two separately. It is still the strongest
-        /// evidence there is that somebody is AT the machine, and somebody at the
-        /// machine is who the CPU ladder exists to get out of the way of.
-        static void AGameStopsCpuWorkToo()
+        /// THE DEFECT THIS PREVENTS, and it is the one the owner asked for.
+        ///
+        /// Policy.Classify returns MachineState.Busy for ANY tier 1 veto, and the
+        /// Busy row zeroes both columns. So a Steam game started, the GPU veto
+        /// fired, the whole row went to zero, and the CPU job was killed for a card
+        /// it had never opened - on a machine with twelve threads sitting idle.
+        /// That defeats the entire point of selling two resources.
+        ///
+        /// A game contends the CARD. The processor falls back to the LightUse row,
+        /// which is careful rather than generous, because a tier 1 veto is the
+        /// strongest evidence this program has that somebody is at the machine -
+        /// stronger than the session signals, since a full-screen game leaves
+        /// GetLastInputInfo idle while somebody plays it with a controller.
+        ///
+        /// This test used to assert the opposite ("a game stops CPU work as well as
+        /// GPU work"). The assertion it made about the GPU is kept exactly.
+        static void AGameOnTheCardDoesNotStopTheProcessor()
         {
-            Case("a game stops CPU work as well as GPU work");
-            var p = new Policy(new Config());
+            Case("a game takes the card and leaves the processor");
+            var c = new Config();
+            var p = new Policy(c);
             Snapshot s = Sn(true, false, true, true, 0, T0);
             s.Launchers.SteamRunningAppId = 12345;
             s.Launchers.SteamRunningAppName = "Something";
             Verdict v = p.Evaluate(s);
-            Ok(!p.CanRunGpu(Mode.Auto), "no GPU work");
-            Ok(!p.CanRunCpu(Mode.Auto), "and no CPU work either");
-            Ok(v.Limits.CpuPct == 0, "because the busy row is zero CPU");
+
+            Ok(v.MachineState == MachineState.Busy, "a game is still the busy row");
+            Ok(v.GpuContended, "and the card is what is contended");
+            Ok(!v.CpuContended, "the processor is not");
+            Ok(!p.CanRunGpu(Mode.Auto), "no GPU work, exactly as before");
+            Ok(!v.Limits.Gpu, "the GPU column is closed");
+
+            ResourceLimits light = c.LimitsFor(MachineState.LightUse);
+            Ok(p.CanRunCpu(Mode.Auto), "but CPU work carries on");
+            Ok(v.Limits.CpuPct == light.CpuPct,
+                "at the light-use cap, not the busy one (got " + v.Limits.CpuPct + ")");
+            Ok(v.Limits.CpuPct > 0 && v.Limits.CpuPct <= 25,
+                "which is careful, because somebody is demonstrably at the machine");
+            Ok(Config.NormalisePriority(v.Limits.Priority) == "idle", "and at idle priority");
+        }
+
+        /// THE MIRROR, and it was equally broken. A sixteen-thread compile forces
+        /// MachineState.Busy through the foreign-CPU vote, the Busy row zeroes the
+        /// GPU column too, and a GPU job died for a processor it was barely using.
+        /// A compile contends the PROCESSOR; the card falls back to LightUse.
+        static void ACompileDoesNotStopTheCard()
+        {
+            Case("a compile takes the processor and leaves the card");
+            var c = new Config();
+            var p = new Policy(c);
+            // Get past the start-up cooldown first: the policy begins Blocked, so
+            // without this the GPU assertion below would pass or fail for a reason
+            // that has nothing to do with the compile.
+            p.Evaluate(Sn(true, false, true, true, 0, T0));
+            p.Evaluate(Sn(true, false, true, true, 0, T0.AddSeconds(95)));
+            Ok(p.CanRunGpu(Mode.Auto), "the card is ours before the compile starts");
+
+            Verdict v = null;
+            // Three consecutive samples of foreign load, because one is an update
+            // check and not a person.
+            for (int i = 0; i < 3; i++)
+            {
+                Snapshot s = Sn(true, false, true, true, 0, T0.AddSeconds(96 + i));
+                s.Cpu = new CpuSample();
+                s.Cpu.Valid = true;
+                s.Cpu.MachinePct = 95; s.Cpu.OwnPct = 0; s.Cpu.ForeignPct = 95;
+                v = p.Evaluate(s);
+            }
+            Ok(v.MachineState == MachineState.Busy, "sustained foreign CPU load is the busy row");
+            Ok(v.CpuContended, "and the processor is what is contended");
+            Ok(!v.GpuContended, "the card is not");
+            Ok(v.Limits.CpuPct == c.LimitsFor(MachineState.Busy).CpuPct,
+                "so the CPU column takes the busy row");
+            Ok(v.Limits.Gpu == c.LimitsFor(MachineState.LightUse).Gpu,
+                "and the GPU column takes the light-use row");
+            Ok(p.CanRunGpu(Mode.Auto),
+                "a GPU job survives a compile, because the compile is not on the card");
+        }
+
+        /// FAIL CLOSED WHEN NOTHING EXPLAINS THE BUSY. The per-resource fallback is
+        /// new code on the yield path, which is the one path in this program that
+        /// must do nothing but evaluate and stop. A Busy that neither flag explains
+        /// - blindness, a missing session block, a signal nobody has classified yet
+        /// - must hand out the whole Busy row and not half of a generous one.
+        static void AnUnexplainedBusyGetsTheWholeBusyRow()
+        {
+            Case("a busy nobody can explain is still the busy row");
+            var c = new Config();
+            var p = new Policy(c);
+            // Blind: signed in, unlocked, and no helper reporting.
+            Verdict v = p.Evaluate(Sn(true, false, false, false, 0, T0));
+            Ok(v.Blind, "the agent cannot see the owner");
+            Ok(v.MachineState == MachineState.Busy, "which is the busy row");
+            Ok(v.GpuContended && v.CpuContended, "blindness contends everything");
+            ResourceLimits busy = c.LimitsFor(MachineState.Busy);
+            Ok(v.Limits.SameAs(busy), "so the whole busy row is handed out, unsplit");
+
+            // And a snapshot with no session block at all, which Classify also
+            // calls Busy and which no resource flag would otherwise cover.
+            var p2 = new Policy(c);
+            var bare = new Snapshot();
+            bare.At = T0; bare.GpuHealthy = true;
+            bare.Gpu = new GpuSample(); bare.Gpu.Valid = true; bare.Gpu.PState = "P8";
+            bare.Gpu.ClockMemMhz = 405; bare.Gpu.PowerWatts = 34.0; bare.Gpu.UtilGpu = 5;
+            bare.Launchers = new LauncherSignals();
+            Verdict v2 = p2.Evaluate(bare);
+            Ok(v2.MachineState == MachineState.Busy, "no session signals is the busy row");
+            Ok(v2.Limits.SameAs(busy), "and it too is handed out whole");
+        }
+
+        /// THE COOLDOWN HAS TO REMEMBER WHY IT IS HOLDING, not only how hard.
+        ///
+        /// The ratchet keeps the worst MachineState seen in ninety seconds. If it
+        /// kept the state and forgot the contention, the very next clear sample
+        /// would find nothing contended, fall back to LightUse for BOTH resources,
+        /// and hand back the card the cooldown exists to withhold - a game paused
+        /// at a menu would get its GPU stolen one second after the veto cleared.
+        static void TheCooldownRemembersWhichResourceWasContended()
+        {
+            Case("the cooldown remembers which resource was contended");
+            var c = new Config();
+            var p = new Policy(c);
+            Snapshot game = Sn(true, false, true, true, 0, T0);
+            game.Launchers.GameProcesses.Add("somegame.exe");
+            Verdict v = p.Evaluate(game);
+            Ok(v.GpuContended && !v.Limits.Gpu, "the game closes the card");
+
+            // The game exits. One second later every signal is clear, but the
+            // cooldown is still holding Busy.
+            v = p.Evaluate(Sn(true, false, true, true, 0, T0.AddSeconds(1)));
+            Ok(v.MachineState == MachineState.Busy, "still held at busy by the cooldown");
+            Ok(v.GpuContended, "and still remembers that it was the card");
+            Ok(!v.Limits.Gpu, "so the card stays closed for the whole cooldown");
+
+            // Ninety seconds later it relaxes properly.
+            v = p.Evaluate(Sn(true, false, true, true, 0, T0.AddSeconds(95)));
+            Ok(v.MachineState != MachineState.Busy,
+                "and after the cooldown it lets go (got " + v.MachineState + ")");
         }
 
         /// RESTRICT INSTANTLY, RELAX SLOWLY. Tightening a cap costs nothing and
@@ -1227,23 +1939,32 @@ namespace IdleGpu
             try
             {
                 string ini = Path.Combine(dir, "worker.ini");
+                // THE VALUES HERE ARE MONOTONE ON PURPOSE, and this test used to
+                // use ones that were not - a below-normal priority and 3000 MiB of
+                // headroom for LightUse, both LOOSER than the Idle row above it.
+                // The grid is now tightened at load, because the cooldown ratchet
+                // takes for granted that a worse state has a smaller row, so those
+                // values were quietly repaired and the round trip failed. That is
+                // the loader working. Round-trip fidelity is asserted on values a
+                // sane grid can hold; the repair has its own test, see
+                // AGridThatInvertsTheLadderIsRepairedNotObeyed.
                 File.WriteAllLines(ini, new string[] {
                     "# a comment that must survive",
                     "StartMode = Auto",
                     "[limits]",
                     "limits.lightuse.cpupct = 7",
-                    "limits.lightuse.priority = belownormal",
+                    "limits.lightuse.priority = idle",
                     "limits.lightuse.workingsetmib = 4096",
-                    "limits.lightuse.minfreemib = 3000",
+                    "limits.lightuse.minfreemib = 7000",
                     "limits.lightuse.gpu = no",
                     "limits.locked.cpupct = 100",
                 });
                 Config c = Config.Load(ini);
                 ResourceLimits l = c.LimitsFor(MachineState.LightUse);
                 Ok(l.CpuPct == 7, "cpupct read back as 7 (got " + l.CpuPct + ")");
-                Ok(Config.NormalisePriority(l.Priority) == "belownormal", "priority read back");
+                Ok(Config.NormalisePriority(l.Priority) == "idle", "priority read back");
                 Ok(l.WorkingSetMib == 4096, "working set read back");
-                Ok(l.MinFreeMib == 3000, "min free read back");
+                Ok(l.MinFreeMib == 7000, "min free read back");
                 Ok(!l.Gpu, "gpu = no read back");
                 Ok(c.LimitsFor(MachineState.Locked).CpuPct == 100, "another state read back too");
                 // A state that was not mentioned keeps its default rather than

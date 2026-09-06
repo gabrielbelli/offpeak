@@ -34,7 +34,13 @@ namespace IdleGpu
             "iso_time,state,util_gpu,util_mem,enc,dec,mem_clk_mhz,sm_clk_mhz,pstate,power_w," +
             "mem_used_mib,eng_3d,eng_decode,eng_encode,gpu_healthy,counters_fresh," +
             "own_session,console_session,console_user,locked,input_idle_s,fullscreen,fg_process," +
-            "steam_appid,steam_appname,vgc,anticheat_svc,game_procs,vram_top_pid,vram_top_name,vram_top_mib,reason";
+            "steam_appid,steam_appname,vgc,anticheat_svc,game_procs,vram_top_pid,vram_top_name,vram_top_mib," +
+            // THE SECOND RESOURCE, and the third time the absent-versus-empty trap
+            // has come up in this file. See the comment on console_user below and
+            // the one on the memory columns further down: the rule is that adding a
+            // COLUMN can never change an old fixture's verdict, but choosing the
+            // wrong DEFAULT for it silently rewrites history.
+            "cpu_total_pct,cpu_own_pct,mem_total_mib,mem_avail_mib,mem_load_pct,reason";
 
         public static List<Snapshot> Load(string path)
         {
@@ -82,6 +88,65 @@ namespace IdleGpu
             // older build still replays as "the stream was fine".
             s.GpuHealthy = B(Get(f, idx, "gpu_healthy"), true);
             s.CountersFresh = B(Get(f, idx, "counters_fresh"), true);
+
+            // THE CPU, AND WHY ABSENT IS NOT ZERO EVEN THOUGH ZERO IS HARMLESS.
+            //
+            // A missing cpu_total_pct would read as an idle processor, which
+            // happens to preserve every existing verdict because zero is under
+            // ForeignCpuBusyPct. That is luck rather than design, and it would put
+            // a measurement in the record that was never taken: a fixture recorded
+            // before this column existed says NOTHING about the processor, and
+            // "nothing" is not "idle". Valid is false instead, which skips the CPU
+            // tier entirely and is the honest reading of a GPU-only recording.
+            //
+            // ForeignPct is recomputed here rather than read, so a hand-written
+            // fixture cannot assert a foreign load that contradicts its own two
+            // numbers. Floored at zero: a pid that exits between two samples loses
+            // its final slice, which makes the machine total momentarily smaller
+            // than our own, and that is a one-tick artefact rather than negative
+            // load. It is also why BusyConfirmSamples can never be 1.
+            var cpu = new CpuSample();
+            cpu.At = s.At;
+            cpu.Valid = idx.ContainsKey("cpu_total_pct");
+            if (cpu.Valid)
+            {
+                cpu.MachinePct = D(Get(f, idx, "cpu_total_pct"));
+                cpu.OwnPct = D(Get(f, idx, "cpu_own_pct"));
+                if (cpu.OwnPct > cpu.MachinePct) cpu.OwnPct = cpu.MachinePct;
+                cpu.ForeignPct = cpu.MachinePct - cpu.OwnPct;
+                if (cpu.ForeignPct < 0) cpu.ForeignPct = 0;
+            }
+            s.Cpu = cpu;
+
+            // MEMORY, WHERE THE WRONG DEFAULT WOULD HAVE BEEN CATASTROPHIC RATHER
+            // THAN MERELY DISHONEST.
+            //
+            // mem_avail_mib defaulting to 0 does not mean "we did not look", it
+            // means ZERO BYTES FREE, and Policy.MemoryAllows would have refused
+            // admission on every one of the fixtures recorded before this column
+            // existed. Every one of them would have kept its policy verdict and
+            // silently stopped being able to start a job.
+            //
+            // So Valid is false when the column is absent, and MemoryAllows fails
+            // OPEN on that - which is the opposite of the rule tier 0 uses for the
+            // user, and deliberately so. Blindness about the USER fails closed
+            // because being wrong costs somebody their match. Blindness about free
+            // memory fails open because being wrong costs a runner that never
+            // starts anything, and that is the worse failure.
+            //
+            // THIS IS NOW THE THIRD COLUMN WITH THIS PROBLEM. Whoever adds the
+            // fourth: the question is never "is the default harmless", it is "does
+            // the default assert something the recording did not say".
+            var mem = new MemorySample();
+            mem.At = s.At;
+            mem.Valid = idx.ContainsKey("mem_avail_mib");
+            if (mem.Valid)
+            {
+                mem.TotalMib = I(Get(f, idx, "mem_total_mib"));
+                mem.AvailableMib = I(Get(f, idx, "mem_avail_mib"));
+                mem.LoadPct = I(Get(f, idx, "mem_load_pct"));
+            }
+            s.Memory = mem;
 
             var ss = new SessionSignals();
             ss.OwnSessionId = (uint)I(Get(f, idx, "own_session"));

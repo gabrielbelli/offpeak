@@ -299,6 +299,44 @@ namespace IdleGpu
         /// way. The cap decides how much; this decides how thinly it is spread.
         public int CpuThreads;
 
+        /// The thread count the child has been told about, so a tick that changes
+        /// nothing writes nothing to a pipe the child may not be reading yet.
+        int _threadsTold = -1;
+
+        /// Tell a RUNNING controller how thinly to spread itself.
+        ///
+        /// THE GAP THIS CLOSES, and it was the one thing in this design that did
+        /// not bind live. IDLEGPU_CPU_THREADS is an environment variable, so it is
+        /// frozen at Process.Start: a job started while nobody was signed in came
+        /// up with a thread per core, and when the owner sat down and the cap fell
+        /// to ten per cent the kernel squeezed it correctly while the job carried
+        /// on with sixteen threads inside 1.6 cores of budget. That is the worst
+        /// configuration a hard cap can be given - every thread spends most of its
+        /// life descheduled and the ones that do run thrash the cache the owner is
+        /// using - so the cap was doing its job and the throughput cost was far
+        /// worse than the cap alone would explain.
+        ///
+        /// The channel already exists. stdin carries YIELD; one more verb costs
+        /// nothing and needs no second pipe, no socket and no file. A controller
+        /// that does not understand THREADS ignores an unknown line, which is what
+        /// the older ones already do, so this is safe against a mixed install.
+        ///
+        /// NOT WRITTEN WHILE STOPPING. Stop() closes stdin as its EOF signal, and
+        /// writing to a closed pipe after that would raise on the sampling thread.
+        public void TellThreads(int n)
+        {
+            if (n <= 0 || n == _threadsTold) return;
+            if (_stopping || !Running) return;
+            try
+            {
+                _proc.StandardInput.WriteLine("THREADS " + n.ToString(CultureInfo.InvariantCulture));
+                _proc.StandardInput.Flush();
+                _threadsTold = n;
+                CpuThreads = n;
+            }
+            catch (Exception) { /* the child is going away; the job object still holds the cap */ }
+        }
+
         /// Push a row of the matrix into the kernel, on a LIVE job.
         ///
         /// THE TRAY REQUIREMENT LIVES OR DIES HERE. A limit that could only be set
@@ -333,16 +371,17 @@ namespace IdleGpu
 
             // --- the cap -------------------------------------------------------
             //
-            // A cap of 100 is not a cap, it is the absence of one, and writing
-            // CpuRate = 10000 would leave the scheduler doing rate accounting for
-            // no reason. ControlFlags = 0 removes it, measured to restore the job
-            // to full speed.
+            // The one decision in here is CpuRate.For, in Model.cs, so that it can
+            // be tested without a job object. It carries the defect it was
+            // extracted to fix: a row of zero used to fall through this branch with
+            // a zeroed struct, and a zeroed struct CLEARS the cap, so a job on its
+            // way out ran UNCAPPED for the whole grace period at the exact moment a
+            // game started.
             var rate = new JOBOBJECT_CPU_RATE_CONTROL_INFORMATION();
-            if (want.CpuPct > 0 && want.CpuPct < 100)
-            {
-                rate.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
-                rate.Value = (uint)(want.CpuPct * 100);
-            }
+            uint flags, value;
+            CpuRate.For(want.CpuPct, out flags, out value);
+            rate.ControlFlags = flags;
+            rate.Value = value;
             SetJobInfo(JobObjectCpuRateControlInformation, rate, "cpu rate");
 
             // --- priority and the working set ----------------------------------
@@ -1076,6 +1115,7 @@ namespace IdleGpu
         void ApplyLimits(ResourceLimits want)
         {
             if (want == null) return;
+            int threads = Config.ThreadsFor(want, Environment.ProcessorCount, Topology.PhysicalCores);
             foreach (JobRunner j in _jobs.Values)
             {
                 if (!j.Running) continue;
@@ -1083,6 +1123,13 @@ namespace IdleGpu
                 {
                     if (j.ApplyLimits(want))
                         Append(j.Service.Id + ": limits now " + want.Describe());
+                    // The kernel side of the cap binds in about 200 ms whatever the
+                    // child is doing. The thread count is a REQUEST: the controller
+                    // applies it between units of work, because torch cannot be
+                    // asked to change its thread pool in the middle of a generate().
+                    // So the cap is the promise and this is the optimisation, and
+                    // they are deliberately not the same mechanism.
+                    if (!j.Service.WantsGpu) j.TellThreads(threads);
                 }
                 catch (Exception ex) { Log("could not apply limits: " + ex.Message); }
             }
@@ -1130,6 +1177,27 @@ namespace IdleGpu
                         Append("mode set to " + Mode + " over the API");
                         SaveMode();
                     }
+                    // THE POLICY THREAD STAYS THE SINGLE WRITER. A route or a CLI
+                    // verb that reached into Config.Limits from a listener thread
+                    // would be racing the sampling loop for the row it is about to
+                    // hand to the kernel. Everything arrives here instead, on the
+                    // one thread that already owns the decision, which is why the
+                    // whole-object swap in SetLimits is safe with no lock.
+                    else if (cmd.Kind == "profile")
+                    {
+                        SetProfile(cmd.Value);
+                    }
+                    else if (cmd.Kind == "limits")
+                    {
+                        MachineState st;
+                        ResourceLimits row;
+                        if (Config.ParseLimitsCommand(_c, cmd.Value, out st, out row))
+                        {
+                            SetLimits(st, row);
+                            SaveLimits();
+                        }
+                        else Log("could not read the limits command: " + cmd.Value);
+                    }
                 }
                 catch (Exception) { }
             }
@@ -1170,59 +1238,74 @@ namespace IdleGpu
                                 " job(s) whose controller was killed before it could put them back");
                     }
 
-                    if (!JobRunning)
-                    {
-                        ResourceLimits limits = _policy.Limits;
-                        bool gpuOk = _policy.CanRunGpu(Mode);
-                        bool cpuOk = _policy.CanRunCpu(Mode);
-                        ServiceDef best = null;
-                        foreach (ServiceDef s in _services)
-                        {
-                            JobRunner j = _jobs[s.Id];
-                            if (j.Stopping) { best = null; break; }
-                            JobStore q = _queues[s.Id];
-                            if (q.QueuedCount() <= 0) continue;
-                            // A CPU service does not wait for a card it never
-                            // touches. Before this the one gate was the GPU's
-                            // Available, so a speech job running on the CPU sat
-                            // out a ninety second cooldown caused by a game on a
-                            // GPU it had no interest in.
-                            if (!(s.WantsGpu ? gpuOk : cpuOk)) continue;
-                            string why;
-                            if (!MemoryAllows(s, limits, out why))
-                            {
-                                if (_memoryHeld.Add(s.Id))
-                                    Log(s.Id + ": not starting yet, " + why);
-                                continue;
-                            }
-                            _memoryHeld.Remove(s.Id);
-                            if (best == null || s.Priority > best.Priority) best = s;
-                        }
-                        if (best != null)
-                        {
-                            ResourceLimits use = Mode == Mode.AlwaysOn ? Config.Unlimited : limits;
-                            JobRunner jr = _jobs[best.Id];
-                            jr.CpuThreads = ThreadsFor(use);
-                            if (jr.Start()) jr.ApplyLimits(use);
-                        }
-                    }
+                    // ONE CONTROLLER PER DEVICE, NOT ONE PER MACHINE. This gate was
+                    // `if (!JobRunning)`, and JobRunning is true when ANY runner is
+                    // running, so a GPU service and a CPU service could never run at
+                    // the same time. That is the product the whole matrix exists to
+                    // describe: a game takes the card and leaves twelve threads
+                    // idle, and the runner is supposed to sell those threads. With
+                    // one machine-wide gate it could not, and the second half of
+                    // this work would have been decoration.
+                    StartBest(true);
+                    StartBest(false);
                 }
                 catch (Exception ex) { Log("scheduler: " + ex.Message); }
                 Sleep(_c.SchedulerPollMs);
             }
         }
 
-        /// How many threads a cap is worth, on this machine.
+        /// Start the best queued service of one device group, if that group is free.
         ///
-        /// Detected, never assumed: Environment.ProcessorCount, because a stranger's
-        /// machine is not sixteen threads. Always at least one, because zero
-        /// threads is not a smaller job, it is no job.
-        static int ThreadsFor(ResourceLimits l)
+        /// The two groups are independent all the way down: their own busy check,
+        /// their own verdict, their own priority contest. What they SHARE is the
+        /// memory admission check, because there is one pool of system memory and
+        /// two jobs drawing on it.
+        void StartBest(bool wantsGpu)
         {
-            if (l == null || l.CpuPct <= 0 || l.CpuPct >= 100) return 0;   // 0 = leave the default alone
-            int n = (int)Math.Round(Environment.ProcessorCount * l.CpuPct / 100.0);
-            return n < 1 ? 1 : n;
+            foreach (JobRunner j in _jobs.Values)
+                if (j.Service.WantsGpu == wantsGpu && (j.Running || j.Stopping)) return;
+
+            ResourceLimits limits = _policy.Limits;
+            if (!(wantsGpu ? _policy.CanRunGpu(Mode) : _policy.CanRunCpu(Mode))) return;
+
+            // KEEP THE WARM JOB, TAKE NO NEW ONES. Admit is a separate field from
+            // CpuPct precisely so this state is expressible: a job that has already
+            // paid its 22 second model load is worth holding at a trickle, and a
+            // new one is not worth starting on a machine somebody is using.
+            if (!_policy.AdmitsNewWork(Mode))
+            {
+                string groupKey = wantsGpu ? "\0gpu-admit" : "\0cpu-admit";
+                if (_admitHeld.Add(groupKey))
+                    Log((wantsGpu ? "gpu" : "cpu") + ": not starting anything new, "
+                        + _policy.Last.StateReason);
+                return;
+            }
+            _admitHeld.Remove(wantsGpu ? "\0gpu-admit" : "\0cpu-admit");
+
+            ServiceDef best = null;
+            foreach (ServiceDef s in _services)
+            {
+                if (s.WantsGpu != wantsGpu) continue;
+                JobStore q = _queues[s.Id];
+                if (q.QueuedCount() <= 0) continue;
+                string why;
+                if (!MemoryAllows(s, limits, out why))
+                {
+                    if (_memoryHeld.Add(s.Id)) Log(s.Id + ": not starting yet, " + why);
+                    continue;
+                }
+                _memoryHeld.Remove(s.Id);
+                if (best == null || s.Priority > best.Priority) best = s;
+            }
+            if (best == null) return;
+
+            ResourceLimits use = Mode == Mode.AlwaysOn ? Config.Unlimited : limits;
+            JobRunner jr = _jobs[best.Id];
+            jr.CpuThreads = Config.ThreadsFor(use, Environment.ProcessorCount, Topology.PhysicalCores);
+            if (jr.Start()) jr.ApplyLimits(use);
         }
+
+        readonly HashSet<string> _admitHeld = new HashSet<string>(StringComparer.Ordinal);
 
         void Sleep(int ms)
         {
@@ -1267,7 +1350,16 @@ namespace IdleGpu
                 Json.P("cpu_pct", Json.Num(v.Limits.CpuPct)),
                 Json.P("priority", Json.Esc(Config.NormalisePriority(v.Limits.Priority))),
                 Json.P("working_set_mib", Json.Num(v.Limits.WorkingSetMib)),
-                Json.P("min_free_mib", Json.Num(v.Limits.MinFreeMib)))).Append(",");
+                Json.P("min_free_mib", Json.Num(v.Limits.MinFreeMib)),
+                Json.P("admit", v.Limits.Admit ? "true" : "false"))).Append(",");
+            // WHICH RESOURCE, not only that something is contended. A client
+            // reading machine_state = busy cannot tell a game from a compile, and
+            // those want opposite decisions from anything choosing between a CPU
+            // and a GPU service.
+            sb.Append(Json.P("gpu_contended", v.GpuContended ? "true" : "false")).Append(",");
+            sb.Append(Json.P("cpu_contended", v.CpuContended ? "true" : "false")).Append(",");
+            sb.Append(Json.P("profile", Json.Esc(_c.EffectiveProfile()))).Append(",");
+            sb.Append(Json.P("profile_label", Json.Esc(_c.EffectiveProfileLabel()))).Append(",");
             sb.Append("\"cpu\":");
             if (s.Cpu != null && s.Cpu.Valid)
                 sb.Append(Json.Obj(
@@ -1438,7 +1530,17 @@ namespace IdleGpu
                 Json.P("cpu_pct", Json.Num(_policy.Limits.CpuPct)),
                 Json.P("priority", Json.Esc(Config.NormalisePriority(_policy.Limits.Priority))),
                 Json.P("working_set_mib", Json.Num(_policy.Limits.WorkingSetMib)),
-                Json.P("min_free_mib", Json.Num(_policy.Limits.MinFreeMib)))).Append(",");
+                Json.P("min_free_mib", Json.Num(_policy.Limits.MinFreeMib)),
+                Json.P("admit", _policy.Limits.Admit ? "true" : "false"))).Append(",");
+            // WHICH RESOURCE IS CONTENDED, not only that something is. A client
+            // reading machine_state = busy cannot tell whether the card has gone to
+            // a game or the processor to a compile, and those want opposite
+            // decisions from a router that has both a CPU and a GPU service to
+            // choose between.
+            sb.Append(Json.P("gpu_contended", _policy.Last.GpuContended ? "true" : "false")).Append(",");
+            sb.Append(Json.P("cpu_contended", _policy.Last.CpuContended ? "true" : "false")).Append(",");
+            sb.Append(Json.P("profile", Json.Esc(_c.EffectiveProfile()))).Append(",");
+            sb.Append(Json.P("profile_label", Json.Esc(_c.EffectiveProfileLabel()))).Append(",");
             sb.Append(Json.P("overriding", overriding ? "true" : "false")).Append(",");
             sb.Append(Json.P("mode", Json.Esc(Mode.ToString()))).Append(",");
             sb.Append(Json.P("seconds_until_available",
@@ -1462,9 +1564,18 @@ namespace IdleGpu
                 // that will not start a 6.5 GiB job on a full machine should say
                 // so rather than accepting the work and sitting on it.
                 bool serviceCan = (d.WantsGpu ? can && _policy.Limits.Gpu : _policy.CanRunCpu(Mode));
-                string memWhy;
+                string memWhy = "";
+                // Admission is part of "will you take my job", not a footnote to
+                // it. A runner whose Busy row keeps its warm job at a trickle and
+                // takes nothing new must say no to a NEW job, or a client will
+                // submit and wait on a queue that is not going to move.
+                if (serviceCan && !_policy.AdmitsNewWork(Mode))
+                {
+                    serviceCan = false;
+                    memWhy = "not starting anything new: " + _policy.Last.StateReason;
+                }
                 if (serviceCan && !MemoryAllows(d, _policy.Limits, out memWhy)) serviceCan = false;
-                else memWhy = "";
+                else if (serviceCan) memWhy = "";
                 sb.Append(Install.Json(d, st,
                     registered && j.Running,
                     q == null ? 0 : q.QueuedCount(),
@@ -1583,7 +1694,10 @@ namespace IdleGpu
                     {
                         string t = raw.Trim().ToLowerInvariant().Replace(" ", "");
                         if (t.StartsWith("limits.") && t.Contains("=")) continue;
+                        if (t.StartsWith("profile=")) continue;
+                        if (t.StartsWith("profile.") && t.Contains("=")) continue;
                         if (t == "[limits]") continue;
+                        if (t.StartsWith("[profile.")) continue;
                         lines.Add(raw);
                     }
                 while (lines.Count > 0 && lines[lines.Count - 1].Trim().Length == 0)
@@ -1592,6 +1706,12 @@ namespace IdleGpu
                 lines.Add("[limits]");
                 lines.Add("# What this machine will give up in each state. Written by the");
                 lines.Add("# settings window; safe to edit by hand.");
+                lines.Add("#");
+                lines.Add("# Profile names a whole posture and fills every cell below. Any");
+                lines.Add("# limits.<state>.<field> line then overrides that one cell, whatever");
+                lines.Add("# order the two appear in, and the runner reports the posture as");
+                lines.Add("# `custom` as soon as one of them differs.");
+                lines.Add("Profile = " + _c.Profile);
                 foreach (MachineState st in Config.AllStates())
                 {
                     ResourceLimits r = _c.LimitsFor(st);
@@ -1603,10 +1723,74 @@ namespace IdleGpu
                     lines.Add(k + "priority = " + Config.NormalisePriority(r.Priority));
                     lines.Add(k + "workingsetmib = " + r.WorkingSetMib.ToString(CultureInfo.InvariantCulture));
                     lines.Add(k + "minfreemib = " + r.MinFreeMib.ToString(CultureInfo.InvariantCulture));
+                    lines.Add(k + "admit = " + (r.Admit ? "yes" : "no"));
                 }
-                File.WriteAllLines(_c.ConfigPath, lines.ToArray(), new UTF8Encoding(false));
+                foreach (string id in _c.SavedProfiles.Keys)
+                {
+                    Dictionary<MachineState, ResourceLimits> grid = _c.SavedProfiles[id];
+                    lines.Add("");
+                    lines.Add("[profile." + id + "]");
+                    string name;
+                    if (_c.SavedProfileNames.TryGetValue(id, out name) && !string.IsNullOrEmpty(name))
+                        lines.Add("profile." + id + ".name = " + name);
+                    foreach (MachineState st in Config.AllStates())
+                    {
+                        ResourceLimits r;
+                        if (!grid.TryGetValue(st, out r) || r == null) continue;
+                        string k = "profile." + id + "." + Config.StateKey(st) + ".";
+                        lines.Add(k + "gpu = " + (r.Gpu ? "yes" : "no"));
+                        lines.Add(k + "cpupct = " + r.CpuPct.ToString(CultureInfo.InvariantCulture));
+                        lines.Add(k + "priority = " + Config.NormalisePriority(r.Priority));
+                        lines.Add(k + "workingsetmib = " + r.WorkingSetMib.ToString(CultureInfo.InvariantCulture));
+                        lines.Add(k + "minfreemib = " + r.MinFreeMib.ToString(CultureInfo.InvariantCulture));
+                        lines.Add(k + "admit = " + (r.Admit ? "yes" : "no"));
+                    }
+                }
+                // WRITTEN WHOLE, THEN MOVED. A half-written worker.ini is a machine
+                // with no limits on it at the next start, which is the one failure
+                // this file must not have: the agent would come up believing it had
+                // been given permission it was never given. The rename is the only
+                // step the next reader can observe.
+                string tmp = _c.ConfigPath + ".tmp";
+                File.WriteAllLines(tmp, lines.ToArray(), new UTF8Encoding(false));
+                if (File.Exists(_c.ConfigPath)) File.Delete(_c.ConfigPath);
+                File.Move(tmp, _c.ConfigPath);
             }
             catch (Exception ex) { Log("could not save limits: " + ex.Message); }
+        }
+
+        /// Switch the whole posture, and make it bite now.
+        ///
+        /// SWITCHING A PROFILE DOES NOT RESTART ANYTHING. It re-applies: every live
+        /// job gets the new row through SetInformationJobObject on its existing
+        /// handle, which measured under a millisecond on spring and bound inside
+        /// the first 200 ms window. The one exception is a posture whose row for
+        /// the CURRENT state means stop, and that goes through the ordinary yield
+        /// path - so the log line names the profile and the row that did it, or the
+        /// owner reads it as "the menu killed my job".
+        public void SetProfile(string id)
+        {
+            Dictionary<MachineState, ResourceLimits> want = _c.ResolveProfile(id);
+            if (want == null) { Log("no posture called " + id); return; }
+            _c.ApplyProfile(id);
+            Append("posture set to " + _c.AnyProfileLabel(id) + " ("
+                + _c.LimitsFor(_policy.MachineState).Describe() + " in the state this machine is in)");
+            ApplyLimits(Mode == Mode.AlwaysOn ? Config.Unlimited : _policy.Limits);
+            SaveLimits();
+        }
+
+        /// Save the live grid as a named posture, so it comes back in the tray.
+        public void SaveProfileAs(string id, string name)
+        {
+            string norm = Config.NormaliseProfile(id);
+            if (norm.Length == 0) return;
+            var grid = new Dictionary<MachineState, ResourceLimits>();
+            foreach (MachineState st in Config.AllStates()) grid[st] = _c.LimitsFor(st).Clone();
+            _c.SavedProfiles[norm] = grid;
+            if (!string.IsNullOrEmpty(name)) _c.SavedProfileNames[norm] = name;
+            _c.Profile = norm;
+            Append("posture saved as " + _c.AnyProfileLabel(norm));
+            SaveLimits();
         }
 
         /// Replace one row of the matrix and make it bite now.
@@ -1620,7 +1804,15 @@ namespace IdleGpu
         {
             if (r == null) return;
             _c.Limits[st] = r.Clone();
-            Append("limits for " + Config.StateLabel(st).ToLowerInvariant() + " set to " + r.Describe());
+            // The ratchet in Policy.Evaluate believes a worse state has a smaller
+            // row. The settings window's spinners and the tray's rungs do not
+            // enforce that on their own, so it is enforced here, once, on the way
+            // in - not at the point where a job would be handed more machine than
+            // the owner meant to lend it.
+            foreach (string fix in _c.TightenGrid()) Append(fix);
+            Append("limits for " + Config.StateLabel(st).ToLowerInvariant() + " set to "
+                + _c.LimitsFor(st).Describe() + "; posture is now " + _c.EffectiveProfileLabel());
+            r = _c.LimitsFor(st);
             // Bind immediately rather than at the next job. The whole point of
             // making this editable from the tray is that the owner changes it
             // while something is running and feels the difference.

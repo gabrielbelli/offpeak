@@ -399,30 +399,315 @@ namespace IdleGpu
 
         public static Dictionary<MachineState, ResourceLimits> DefaultLimits()
         {
-            var d = new Dictionary<MachineState, ResourceLimits>();
-            d[MachineState.NobodyHome] = L(true, 100, "normal", 0, 1024);
-            d[MachineState.Locked] = L(true, 100, "belownormal", 0, 2048);
-            d[MachineState.Idle] = L(true, 50, "idle", 0, 4096);
-            // The working set cap on LightUse is the one that keeps a 6.5 GiB
-            // model out of the owner's way. It does not stop the job allocating,
-            // it stops the job HOLDING: measured, a child that committed 512 MiB
-            // ran to completion with its working set trimmed to 191 MiB under a
-            // 192 MiB limit. The job pages, the owner's browser does not.
-            d[MachineState.LightUse] = L(false, 10, "idle", 8192, 6144);
-            d[MachineState.Busy] = L(false, 0, "idle", 0, 0);
-            return d;
+            return ProfileLimits(ProfileBalanced);
         }
 
         /// What Always-on means, and what "nobody is home" ships as. Named rather
         /// than rebuilt, because it is compared against on every sampling tick.
-        public static readonly ResourceLimits Unlimited = L(true, 100, "normal", 0, 0);
+        public static readonly ResourceLimits Unlimited = L(true, 100, "normal", 0, 0, true);
 
-        static ResourceLimits L(bool gpu, int cpu, string prio, int ws, int minFree)
+        static ResourceLimits L(bool gpu, int cpu, string prio, int ws, int minFree, bool admit)
         {
             var r = new ResourceLimits();
             r.Gpu = gpu; r.CpuPct = cpu; r.Priority = prio;
-            r.WorkingSetMib = ws; r.MinFreeMib = minFree;
+            r.WorkingSetMib = ws; r.MinFreeMib = minFree; r.Admit = admit;
             return r;
+        }
+
+        // -- profiles ------------------------------------------------------------
+        //
+        // A NAME ON TOP OF THE GRID, because twenty-five numbers is a form and
+        // nobody fills in a form to lend a computer. A profile is a complete
+        // matrix with a name and one sentence saying what it means, and it is
+        // what the tray offers first. The grid stays underneath it, unchanged, for
+        // anybody who does want to price each cell.
+        //
+        // OFF IS NOT A PROFILE, deliberately. Mode.Off already means "sell
+        // nothing", and a profile of the same name would give the runner two
+        // encodings of one state and a status line reading "Auto, profile Off".
+        // Mode is the big switch; a profile is what Auto MEANS. The tray shows
+        // them in the same region so the owner sees four answers, but only three
+        // of them are matrices.
+
+        public const string ProfileGenerous = "generous";
+        public const string ProfileBalanced = "balanced";
+        public const string ProfileAway = "away";
+
+        public static string[] ProfileIds()
+        {
+            return new string[] { ProfileGenerous, ProfileBalanced, ProfileAway };
+        }
+
+        public static string ProfileLabel(string id)
+        {
+            switch (NormaliseProfile(id))
+            {
+                case ProfileGenerous: return "Generous";
+                case ProfileAway: return "Only when I am away";
+                default: return "Balanced";
+            }
+        }
+
+        public static string ProfileBlurb(string id)
+        {
+            switch (NormaliseProfile(id))
+            {
+                case ProfileGenerous: return "use it unless I am actually gaming";
+                case ProfileAway: return "never while I am signed in and unlocked";
+                default: return "use it while I am away, and stay out of my way when I am here";
+            }
+        }
+
+        public static string NormaliseProfile(string id)
+        {
+            string t = (id ?? "").Trim().ToLowerInvariant().Replace(" ", "").Replace("_", "");
+            if (t == ProfileGenerous) return ProfileGenerous;
+            if (t == ProfileAway || t == "onlywhenaway" || t == "onlywheniamaway") return ProfileAway;
+            if (t == ProfileBalanced) return ProfileBalanced;
+            return t;   // a saved custom profile keeps its own id
+        }
+
+        /// The whole matrix a profile stands for.
+        ///
+        /// WHERE THE CPU NUMBERS COME FROM. probe/p10_cpu.ps1 on spring: an eight
+        /// thread foreground victim over a 48 MiB array against sixteen background
+        /// threads each streaming 128 MiB, which is more than the whole 96 MiB L3.
+        ///
+        ///   condition            p50       p99      units kept
+        ///   nothing running      4.32 ms   7.82 ms  7155
+        ///   16 at NORMAL         7.90     40.94     1929
+        ///   16 at IDLE          10.38     13.28     4281
+        ///   IDLE + 50% cap      10.38     13.18     4391
+        ///   IDLE + 25% cap       5.93     12.53     5701
+        ///   IDLE + 10% cap       4.89     11.89     6452
+        ///   IDLE +  5% cap       4.74     10.61     6725
+        ///
+        /// Two things fall straight out and both shaped every cell. IDLE PRIORITY
+        /// ALONE IS NOT ENOUGH - it still cost 40 per cent of the victim's
+        /// throughput, because a memory-streaming thread has already evicted the
+        /// victim's cache lines by the time the scheduler preempts. And A 50 PER
+        /// CENT CAP BUYS NOTHING - eight streaming threads saturate the memory
+        /// controller on their own. The cap starts paying at 25 and is close to
+        /// invisible at 10 (90 per cent of throughput kept) and 5 (94 per cent).
+        ///
+        /// THE GPU COLUMN IS YES IN EVERY ROW BUT BUSY, in all three profiles
+        /// except Away. That is a deliberate choice between three things that used
+        /// to disagree: this file shipped LightUse as no, worker.ini.example
+        /// shipped it as yes, and Policy.CanRunGpu's docstring promised yes. The
+        /// promise wins, because the GPU detector is already the gate for the GPU
+        /// and shipping a matrix that silently starts refusing GPU work while
+        /// somebody reads a web page would change behaviour nobody asked to
+        /// change. An owner who wants the other answer picks "Only when I am
+        /// away", or sets limits.lightuse.gpu = no.
+        public static Dictionary<MachineState, ResourceLimits> ProfileLimits(string id)
+        {
+            var d = new Dictionary<MachineState, ResourceLimits>();
+            switch (NormaliseProfile(id))
+            {
+                case ProfileGenerous:
+                    d[MachineState.NobodyHome] = L(true, 100, "normal", 0, 512, true);
+                    d[MachineState.Locked] = L(true, 100, "normal", 0, 1024, true);
+                    d[MachineState.Idle] = L(true, 100, "belownormal", 0, 2048, true);
+                    d[MachineState.LightUse] = L(true, 25, "idle", 12288, 4096, true);
+                    d[MachineState.Busy] = L(false, 10, "idle", 4096, 0, false);
+                    break;
+
+                case ProfileAway:
+                    // Five rows collapsed into two, which is the argument for
+                    // profiles in one table: somebody who wants a two-state world
+                    // gets it without having to learn there are five rows.
+                    d[MachineState.NobodyHome] = L(true, 100, "normal", 0, 1024, true);
+                    d[MachineState.Locked] = L(true, 100, "belownormal", 0, 2048, true);
+                    d[MachineState.Idle] = L(false, 0, "idle", 0, 0, false);
+                    d[MachineState.LightUse] = L(false, 0, "idle", 0, 0, false);
+                    d[MachineState.Busy] = L(false, 0, "idle", 0, 0, false);
+                    break;
+
+                default:
+                    d[MachineState.NobodyHome] = L(true, 100, "normal", 0, 1024, true);
+                    d[MachineState.Locked] = L(true, 100, "belownormal", 0, 2048, true);
+                    d[MachineState.Idle] = L(true, 50, "idle", 0, 4096, true);
+                    // The working set ceiling on LightUse is the one that keeps a
+                    // 4.7 GiB model out of the owner's way. It does not stop the
+                    // job allocating, it stops the job HOLDING: measured, a child
+                    // that committed 512 MiB ran to completion with its working set
+                    // trimmed to 191 MiB under a 192 MiB limit. The job pages, the
+                    // owner's browser does not.
+                    d[MachineState.LightUse] = L(true, 10, "idle", 8192, 6144, true);
+                    // BUSY IS ZERO IN BALANCED, not the five per cent the measured
+                    // throughput numbers would support, and that is the cautious
+                    // reading on purpose: every CPU figure above came from a
+                    // synthetic memory-streaming victim rather than from a game,
+                    // so this is the one cell in the grid nobody has proved. The
+                    // per-resource split means it rarely bites anyway - a game
+                    // contends the CARD, so a CPU job falls back to the LightUse
+                    // row rather than to this one. Somebody who wants the warm job
+                    // kept at a trickle picks Generous, which ships 10.
+                    d[MachineState.Busy] = L(false, 0, "idle", 0, 0, false);
+                    break;
+            }
+            return d;
+        }
+
+        /// Two settings that are per profile because they encode how twitchy the
+        /// owner wants the detector to be, rather than what it is safe to do.
+        ///
+        /// NOT PER PROFILE, and the distinction matters: ClearCooldownSeconds,
+        /// BusyConfirmSamples and FastPollMs stay global. Those are safety
+        /// properties, not intents. Ninety seconds is chosen for human behaviour -
+        /// longer than a level load, longer than a round gap - and three samples
+        /// cannot be one, because a pid that exits between two samples spikes
+        /// ForeignPct for exactly one tick.
+        public static void ProfileTuning(string id, out int idleAfterSeconds, out double foreignCpuBusyPct)
+        {
+            switch (NormaliseProfile(id))
+            {
+                case ProfileGenerous: idleAfterSeconds = 120; foreignCpuBusyPct = 70.0; break;
+                case ProfileAway: idleAfterSeconds = 300; foreignCpuBusyPct = 30.0; break;
+                default: idleAfterSeconds = 300; foreignCpuBusyPct = 40.0; break;
+            }
+        }
+
+        /// The posture in force, before any per-cell override is counted.
+        public string Profile = ProfileBalanced;
+
+        /// Custom postures saved from the settings window, by id.
+        public Dictionary<string, Dictionary<MachineState, ResourceLimits>> SavedProfiles =
+            new Dictionary<string, Dictionary<MachineState, ResourceLimits>>(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> SavedProfileNames =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        /// Does the live grid still match the profile it claims to be.
+        ///
+        /// PRECEDENCE, STATED ONCE. `Profile = <id>` resolves to a full matrix;
+        /// any limits.<state>.<field> line present then overrides that one cell;
+        /// and if any override differs from the named profile the effective
+        /// profile is "custom" and the tray says "Custom, based on Balanced".
+        /// Nothing is silently reinterpreted, and nobody has to guess whether the
+        /// name or the numbers won.
+        public bool MatchesProfile(string id)
+        {
+            Dictionary<MachineState, ResourceLimits> want = ResolveProfile(id);
+            if (want == null) return false;
+            foreach (MachineState st in AllStates())
+            {
+                ResourceLimits a = LimitsFor(st);
+                ResourceLimits b;
+                if (!want.TryGetValue(st, out b) || b == null) return false;
+                if (!a.SameAs(b)) return false;
+            }
+            return true;
+        }
+
+        public Dictionary<MachineState, ResourceLimits> ResolveProfile(string id)
+        {
+            string norm = NormaliseProfile(id);
+            Dictionary<MachineState, ResourceLimits> saved;
+            // TIGHTENED ON THE WAY OUT, so that "does the live grid match this
+            // posture" compares like with like. A saved posture is whatever
+            // somebody typed, and the live grid is always monotone because the
+            // loader repairs it. Without this the two could never be equal, and a
+            // hand-written custom profile would report as "custom" the instant it
+            // was applied - which is exactly the state it is meant to escape.
+            if (SavedProfiles.TryGetValue(norm, out saved) && saved != null) return Tighten(saved);
+            foreach (string p in ProfileIds()) if (p == norm) return Tighten(ProfileLimits(norm));
+            return null;
+        }
+
+        /// What the tray and the API should call the posture in force. Returns
+        /// "custom" when the grid has been edited away from its named profile.
+        public string EffectiveProfile()
+        {
+            if (MatchesProfile(Profile)) return NormaliseProfile(Profile);
+            foreach (string p in ProfileIds()) if (MatchesProfile(p)) return p;
+            foreach (string k in SavedProfiles.Keys) if (MatchesProfile(k)) return NormaliseProfile(k);
+            return "custom";
+        }
+
+        public string EffectiveProfileLabel()
+        {
+            string eff = EffectiveProfile();
+            if (eff != "custom") return AnyProfileLabel(eff);
+            return "Custom, based on " + AnyProfileLabel(Profile);
+        }
+
+        public string AnyProfileLabel(string id)
+        {
+            string norm = NormaliseProfile(id);
+            string name;
+            if (SavedProfileNames.TryGetValue(norm, out name) && !string.IsNullOrEmpty(name)) return name;
+            return ProfileLabel(norm);
+        }
+
+        /// Fill every cell from a named posture, and move the two tunings with it.
+        public void ApplyProfile(string id)
+        {
+            Dictionary<MachineState, ResourceLimits> want = ResolveProfile(id);
+            if (want == null) return;
+            Profile = NormaliseProfile(id);
+            var fresh = new Dictionary<MachineState, ResourceLimits>();
+            foreach (MachineState st in AllStates())
+            {
+                ResourceLimits r;
+                fresh[st] = want.TryGetValue(st, out r) && r != null
+                    ? r.Clone() : L(false, 0, "idle", 0, 0, false);
+            }
+            Limits = fresh;
+            int idleAfter; double busyPct;
+            ProfileTuning(Profile, out idleAfter, out busyPct);
+            IdleAfterSeconds = idleAfter;
+            ForeignCpuBusyPct = busyPct;
+            TightenGrid();
+        }
+
+        /// Make the grid monotone, because the cooldown ratchet assumes it is.
+        ///
+        /// Policy.Evaluate holds the WORST MachineState seen inside ninety seconds
+        /// and then looks its row up, which takes for granted that a worse state
+        /// has a smaller row. Nothing enforced that. A grid where Busy is more
+        /// generous than LightUse - one hand edit, one mistyped spinner, one saved
+        /// custom posture - would invert the ratchet and hand the job MORE machine
+        /// at the moment the owner sat down, which is the exact opposite of the
+        /// only promise this program makes.
+        ///
+        /// REPAIRED RATHER THAN REFUSED. A person who mistypes a number must not
+        /// end up with an agent that will not start. Each row is tightened to be
+        /// no looser than the row above it, and the repair is reported so it is
+        /// not silent.
+        public List<string> TightenGrid()
+        {
+            var fixes = new List<string>();
+            MachineState[] ladder = AllStates();
+            for (int i = 1; i < ladder.Length; i++)
+            {
+                ResourceLimits looser = LimitsFor(ladder[i - 1]);
+                ResourceLimits here = LimitsFor(ladder[i]);
+                if (here.NoMoreThan(looser)) continue;
+                ResourceLimits fixedRow = ResourceLimits.Tighter(here, looser);
+                Limits[ladder[i]] = fixedRow;
+                fixes.Add(StateLabel(ladder[i]) + " was more generous than "
+                    + StateLabel(ladder[i - 1]).ToLowerInvariant()
+                    + ", so it was tightened to: " + fixedRow.Describe());
+            }
+            return fixes;
+        }
+
+        /// The same repair on a grid that is not the live one, for profiles.
+        public static Dictionary<MachineState, ResourceLimits> Tighten(
+            Dictionary<MachineState, ResourceLimits> grid)
+        {
+            var outp = new Dictionary<MachineState, ResourceLimits>();
+            MachineState[] ladder = AllStates();
+            foreach (MachineState st in ladder)
+            {
+                ResourceLimits r;
+                outp[st] = grid != null && grid.TryGetValue(st, out r) && r != null
+                    ? r.Clone() : L(false, 0, "idle", 0, 0, false);
+            }
+            for (int i = 1; i < ladder.Length; i++)
+                if (!outp[ladder[i]].NoMoreThan(outp[ladder[i - 1]]))
+                    outp[ladder[i]] = ResourceLimits.Tighter(outp[ladder[i]], outp[ladder[i - 1]]);
+            return outp;
         }
 
         /// The named rungs the tray offers, as data rather than as menu code.
@@ -444,10 +729,46 @@ namespace IdleGpu
 
         public static ResourceLimits Rung(int i)
         {
-            if (i == 0) return L(true, 100, "normal", 0, 1024);
-            if (i == 1) return L(true, 50, "belownormal", 0, 2048);
-            if (i == 2) return L(true, 10, "idle", 8192, 6144);
-            return L(false, 0, "idle", 0, 0);
+            if (i == 0) return L(true, 100, "normal", 0, 1024, true);
+            if (i == 1) return L(true, 50, "belownormal", 0, 2048, true);
+            if (i == 2) return L(true, 10, "idle", 8192, 6144, true);
+            return L(false, 0, "idle", 0, 0, false);
+        }
+
+        /// How many threads a cap is worth, on this machine.
+        ///
+        /// WHY THE CHILD NEEDS TELLING AT ALL, given the kernel enforces the cap.
+        /// Because it is a HARD cap: once the job has spent its share of a
+        /// scheduling interval, no thread in it runs until the next one. A torch
+        /// process that defaults to one thread per logical processor then has
+        /// sixteen threads taking turns inside a tenth of a machine, which
+        /// finishes no sooner than two would and evicts far more of the owner's
+        /// cache on the way. The cap decides how much; this decides how thinly it
+        /// is spread.
+        ///
+        /// AT ONE HUNDRED PER CENT THE ANSWER IS THE PHYSICAL CORE COUNT, not the
+        /// logical one and not "leave the default alone". Chatterbox's T3
+        /// transformer is autoregressive at batch one, which is work bound by
+        /// single-thread latency rather than by throughput, and the NAS thread
+        /// sweep is unambiguous about what that does to scaling: 0.077 realtime at
+        /// 2 threads, 0.230 at 8, 0.285 at 16 - per-thread efficiency halving from
+        /// 2 to 16. Two sibling threads on one core share the L1, the L2 and the
+        /// front end, so SMT buys almost nothing here and costs cache residency on
+        /// a model whose whole advantage is a 96 MiB L3 it walks every token.
+        ///
+        /// DETECTED, NEVER ASSUMED. Both counts are passed in. A stranger's
+        /// machine is not sixteen threads and is not eight cores, and when the
+        /// physical count cannot be read the logical one is used, which is the old
+        /// behaviour rather than a guess.
+        public static int ThreadsFor(ResourceLimits l, int logical, int physical)
+        {
+            if (logical < 1) logical = 1;
+            if (physical < 1 || physical > logical) physical = logical;
+            if (l == null || l.CpuPct <= 0) return 0;      // 0 = leave the default alone
+            if (l.CpuPct >= 100) return physical;
+            int n = (int)Math.Round(logical * l.CpuPct / 100.0);
+            if (n < 1) n = 1;
+            return n > physical ? physical : n;
         }
 
         public ResourceLimits LimitsFor(MachineState st)
@@ -456,7 +777,7 @@ namespace IdleGpu
             if (Limits != null && Limits.TryGetValue(st, out r) && r != null) return r;
             // A row nobody configured is the most restrictive row, never the most
             // generous one. Missing configuration must not read as permission.
-            return L(false, 0, "idle", 0, 0);
+            return L(false, 0, "idle", 0, 0, false);
         }
 
         public static string StateKey(MachineState st)
@@ -585,6 +906,17 @@ namespace IdleGpu
             c.ConfigPath = path == null ? "" : path;
             if (path == null || !File.Exists(path)) { c.Resolve(); return c; }
 
+            // TWO PASSES, BECAUSE PRECEDENCE MUST NOT DEPEND ON LINE ORDER.
+            // `Profile = away` fills every cell; `limits.busy.cpupct = 50`
+            // overrides one. If both were applied as they were read, a file with
+            // the profile line UNDERNEATH the override would silently lose the
+            // override, and a file with it above would keep it - the same file
+            // meaning two different things depending on how somebody happened to
+            // type it. So the overrides are collected here and replayed after the
+            // profile has been resolved, whatever order they appear in.
+            var overrides = new List<string[]>();
+            string wantProfile = null;
+
             ServiceDef current = null;
             foreach (string raw in File.ReadAllLines(path))
             {
@@ -617,14 +949,31 @@ namespace IdleGpu
                 string v = line.Substring(eq + 1).Trim();
                 try
                 {
-                    if (current != null) ApplyService(current, k, v);
-                    else Apply(c, k, v);
+                    if (current != null) { ApplyService(current, k, v); continue; }
+                    if (k == "profile") { wantProfile = v; continue; }
+                    if (k.StartsWith("limits.", StringComparison.Ordinal)) { overrides.Add(new string[] { k, v }); continue; }
+                    Apply(c, k, v);
                 }
                 catch (Exception) { /* a bad line must not stop the agent starting */ }
             }
+
+            // The profile first, so that its two tunings and its whole matrix are
+            // in place, then the per-cell overrides on top of it.
+            if (wantProfile != null && c.ResolveProfile(wantProfile) != null) c.ApplyProfile(wantProfile);
+            else if (wantProfile != null) c.Profile = NormaliseProfile(wantProfile);
+            foreach (string[] kv in overrides)
+            {
+                try { ApplyLimit(c, kv[0], kv[1]); }
+                catch (Exception) { }
+            }
+            c.GridRepairs = c.TightenGrid();
             c.Resolve();
             return c;
         }
+
+        /// Rows the loader had to tighten because the file was not monotone, in
+        /// the words the log and the settings window use. Empty on a sane file.
+        public List<string> GridRepairs = new List<string>();
 
         static void ApplyService(ServiceDef s, string k, string v)
         {
@@ -734,27 +1083,104 @@ namespace IdleGpu
         /// must not stop the agent starting.
         static void ApplyLimit(Config c, string k, string v)
         {
+            if (k.StartsWith("profile.", StringComparison.Ordinal)) { ApplySavedProfile(c, k, v); return; }
             if (!k.StartsWith("limits.", StringComparison.Ordinal)) return;
             string[] parts = k.Split('.');
             if (parts.Length != 3) return;
             MachineState st = MachineState.Busy;
-            bool found = false;
-            foreach (MachineState s in AllStates())
-                if (StateKey(s) == parts[1]) { st = s; found = true; break; }
-            if (!found) return;
+            if (!StateFromKey(parts[1], out st)) return;
             ResourceLimits r;
             if (!c.Limits.TryGetValue(st, out r) || r == null)
             {
                 r = new ResourceLimits(); c.Limits[st] = r;
             }
-            switch (parts[2])
+            SetField(r, parts[2], v);
+        }
+
+        /// One row, as `state field=value field=value`, for POST /v1/limits and
+        /// for `idlegpu limits`.
+        ///
+        /// WHY A STRING AND NOT A STRUCT. Command carries one string across the
+        /// queue that keeps the policy thread the single writer, and inventing a
+        /// second payload type for one route would mean a second thing to keep in
+        /// step with the parser that reads worker.ini. The field names are the SAME
+        /// names as the file's, deliberately, so anybody who has read one surface
+        /// can use the other without a table.
+        ///
+        /// FIELDS NOT MENTIONED KEEP THEIR CURRENT VALUE. A caller that wants to
+        /// change one cap should not have to restate the priority, the ceiling and
+        /// the headroom, and a caller that forgets one should not silently reset it
+        /// to a default it never chose.
+        public static bool ParseLimitsCommand(Config c, string spec, out MachineState st, out ResourceLimits row)
+        {
+            st = MachineState.Busy; row = null;
+            if (c == null || string.IsNullOrEmpty(spec)) return false;
+            string[] words = spec.Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length == 0) return false;
+            if (!StateFromKey(words[0].Trim().ToLowerInvariant(), out st)) return false;
+            row = c.LimitsFor(st).Clone();
+            for (int i = 1; i < words.Length; i++)
+            {
+                int eq = words[i].IndexOf('=');
+                if (eq <= 0) continue;
+                string f = words[i].Substring(0, eq).Trim().ToLowerInvariant().Replace("_", "");
+                string v = words[i].Substring(eq + 1).Trim();
+                try { SetField(row, f, v); }
+                catch (Exception) { /* one bad field must not lose the others */ }
+            }
+            return true;
+        }
+
+        static bool StateFromKey(string key, out MachineState st)
+        {
+            st = MachineState.Busy;
+            foreach (MachineState s in AllStates())
+                if (StateKey(s) == key) { st = s; return true; }
+            return false;
+        }
+
+        static void SetField(ResourceLimits r, string field, string v)
+        {
+            switch (field)
             {
                 case "gpu": r.Gpu = Truthy(v); break;
                 case "cpupct": r.CpuPct = Clamp(int.Parse(v, CultureInfo.InvariantCulture), 0, 100); break;
                 case "priority": r.Priority = NormalisePriority(v); break;
                 case "workingsetmib": r.WorkingSetMib = Math.Max(0, int.Parse(v, CultureInfo.InvariantCulture)); break;
                 case "minfreemib": r.MinFreeMib = Math.Max(0, int.Parse(v, CultureInfo.InvariantCulture)); break;
+                case "admit": r.Admit = Truthy(v); break;
             }
+        }
+
+        /// profile.<id>.name = Night shift, and profile.<id>.<state>.<field>.
+        ///
+        /// The SAME flat-key shape as [limits], and for the same reason: the
+        /// parser treats section headers as decoration, so one shape covers both
+        /// and there is no second thing to get wrong in a file somebody edits at
+        /// 2am. A saved posture appears in the tray list beside the three shipped
+        /// ones; there is no manager and no deletion beyond editing this file,
+        /// which is a deliberate limit on how much furniture this grows.
+        static void ApplySavedProfile(Config c, string k, string v)
+        {
+            string[] parts = k.Split('.');
+            if (parts.Length < 3) return;
+            string id = NormaliseProfile(parts[1]);
+            if (id.Length == 0) return;
+            if (parts.Length == 3 && parts[2] == "name") { c.SavedProfileNames[id] = v; return; }
+            if (parts.Length != 4) return;
+            MachineState st;
+            if (!StateFromKey(parts[2], out st)) return;
+            Dictionary<MachineState, ResourceLimits> grid;
+            if (!c.SavedProfiles.TryGetValue(id, out grid) || grid == null)
+            {
+                // A saved posture starts from Balanced rather than from nothing, so
+                // a file that names three cells still describes a whole machine.
+                grid = ProfileLimits(ProfileBalanced);
+                c.SavedProfiles[id] = grid;
+            }
+            ResourceLimits r;
+            if (!grid.TryGetValue(st, out r) || r == null) { r = new ResourceLimits(); grid[st] = r; }
+            SetField(r, parts[3], v);
         }
 
         static int Clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }

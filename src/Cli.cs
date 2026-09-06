@@ -129,6 +129,8 @@ namespace IdleGpu
                     case "result": return Result(client, pos, outFile, artefact);
                     case "cancel": return Cancel(client, pos, raw);
                     case "mode": return SetMode(client, pos, raw);
+                    case "profile": return SetProfile(client, pos, raw);
+                    case "limits": return SetLimits(client, pos, raw);
                     case "asset": return Asset(client, pos, raw);
                     case "routes": return Simple(client, "GET", "/", raw);
                     default:
@@ -422,6 +424,75 @@ namespace IdleGpu
             return r.Ok ? 0 : 1;
         }
 
+        /// POLICY WITHOUT A GUI, and this is not a convenience.
+        ///
+        /// The settings window needs a desktop session to exist. The agent's
+        /// normal home is a boot task under SYSTEM, which has no desktop at all,
+        /// and the person most likely to want to change what a headless machine
+        /// lends out is reaching it over SSH. So every change the window can make
+        /// is also a verb here and a route there, and all three arrive at the same
+        /// bounded command queue that keeps the policy thread the single writer.
+        static int SetProfile(RunnerClient c, List<string> pos, bool raw)
+        {
+            if (pos.Count < 2)
+            {
+                Console.Error.WriteLine("usage: idlegpu profile generous|balanced|away|<saved id>");
+                Console.Error.WriteLine("  generous  use it unless I am actually gaming");
+                Console.Error.WriteLine("  balanced  use it while I am away, and stay out of my way when I am here");
+                Console.Error.WriteLine("  away      never while I am signed in and unlocked");
+                return 2;
+            }
+            byte[] b = new UTF8Encoding(false).GetBytes(
+                Json.Obj(Json.P("profile", Json.Esc(pos[1]))));
+            Response r = c.Send("POST", "/v1/profile", b, "application/json", null);
+            Console.WriteLine(r.Text.TrimEnd());
+            return r.Ok ? 0 : 1;
+        }
+
+        /// One row of the matrix. Fields not named keep the value they have, so
+        /// changing one cap does not silently reset the four settings beside it.
+        static int SetLimits(RunnerClient c, List<string> pos, bool raw)
+        {
+            if (pos.Count < 2)
+            {
+                Console.Error.WriteLine(
+                    "usage: idlegpu limits <state> [cpupct=N] [priority=normal|belownormal|idle]");
+                Console.Error.WriteLine(
+                    "                        [gpu=yes|no] [workingsetmib=N] [minfreemib=N] [admit=yes|no]");
+                Console.Error.WriteLine("  states: nobodyhome locked idle lightuse busy");
+                Console.Error.WriteLine("  cpupct is a share of the WHOLE MACHINE, never a core count.");
+                Console.Error.WriteLine("  0 means do not run, because the kernel has no zero cap.");
+                return 2;
+            }
+            var fields = new List<string>();
+            fields.Add(Json.P("state", Json.Esc(pos[1])));
+            for (int i = 2; i < pos.Count; i++)
+            {
+                int eq = pos[i].IndexOf('=');
+                if (eq <= 0) continue;
+                string k = pos[i].Substring(0, eq).Trim().ToLowerInvariant().Replace("_", "");
+                string v = pos[i].Substring(eq + 1).Trim();
+                string name;
+                switch (k)
+                {
+                    case "cpupct": case "cpu": name = "cpu_pct"; break;
+                    case "workingsetmib": case "ram": name = "working_set_mib"; break;
+                    case "minfreemib": case "free": name = "min_free_mib"; break;
+                    case "priority": name = "priority"; break;
+                    case "gpu": name = "gpu"; break;
+                    case "admit": name = "admit"; break;
+                    default:
+                        Console.Error.WriteLine("unknown field: " + k);
+                        return 2;
+                }
+                fields.Add(Json.P(name, Json.Esc(v)));
+            }
+            byte[] b = new UTF8Encoding(false).GetBytes(Json.Obj(fields.ToArray()));
+            Response r = c.Send("POST", "/v1/limits", b, "application/json", null);
+            Console.WriteLine(r.Text.TrimEnd());
+            return r.Ok ? 0 : 1;
+        }
+
         static int SetMode(RunnerClient c, List<string> pos, bool raw)
         {
             if (pos.Count < 2) { Console.Error.WriteLine("usage: idlegpu mode Auto|AlwaysOn|Off"); return 2; }
@@ -676,6 +747,9 @@ namespace IdleGpu
             Console.WriteLine("  idlegpu result <svc> <job> -o F    stream an artefact out [--artefact NAME]");
             Console.WriteLine("  idlegpu cancel <svc> <job>         withdraw it, or ask the controller to stop");
             Console.WriteLine("  idlegpu mode Auto|AlwaysOn|Off     change the mode");
+            Console.WriteLine("  idlegpu profile <name>             generous | balanced | away | <saved id>");
+            Console.WriteLine("  idlegpu limits <state> [k=v ...]   one row: cpupct, priority, gpu,");
+            Console.WriteLine("                                     workingsetmib, minfreemib, admit");
             Console.WriteLine("  idlegpu asset put <file>           store a blob, print its sha256");
             Console.WriteLine("  idlegpu fingerprint                the certificate digest every client pins");
             Console.WriteLine();

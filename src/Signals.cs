@@ -377,6 +377,82 @@ namespace IdleGpu
     ///
     /// Measured cost on spring: 0.001 ms per call over a thousand calls, so this
     /// can sit on the fast loop without being noticed.
+    /// How many PHYSICAL cores this machine has, as opposed to logical ones.
+    ///
+    /// WHY IT IS WORTH A SYSCALL. Config.ThreadsFor caps a job's thread count at
+    /// the physical core count, because Chatterbox's transformer is autoregressive
+    /// at batch one and two sibling threads on one core share the L1, the L2 and
+    /// the front end. Environment.ProcessorCount answers the logical question and
+    /// there is no managed way to ask the other one without System.Management,
+    /// which is a reference this project does not carry and a WMI query this
+    /// project does not want on a machine with kernel anti-cheat on it.
+    ///
+    /// GetLogicalProcessorInformation is a documented kernel32 read with no
+    /// privilege, no handle and no instrumentation. Counted ONCE and cached: the
+    /// core count of a machine does not change while the agent runs, and this is
+    /// read from the scheduler loop.
+    ///
+    /// FALLS BACK TO THE LOGICAL COUNT rather than to a guess. A machine whose
+    /// topology cannot be read gets the behaviour it had before this existed.
+    public static class Topology
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct SYSTEM_LOGICAL_PROCESSOR_INFORMATION
+        {
+            public UIntPtr ProcessorMask;
+            public int Relationship;         // RelationProcessorCore = 0
+            public ulong Reserved0;
+            public ulong Reserved1;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetLogicalProcessorInformation(IntPtr buffer, ref uint returnLength);
+
+        const int RelationProcessorCore = 0;
+        const int ERROR_INSUFFICIENT_BUFFER = 122;
+
+        static int _cores = -1;
+
+        public static int PhysicalCores
+        {
+            get
+            {
+                if (_cores > 0) return _cores;
+                _cores = Count();
+                return _cores;
+            }
+        }
+
+        static int Count()
+        {
+            int logical = Environment.ProcessorCount;
+            uint len = 0;
+            try
+            {
+                if (GetLogicalProcessorInformation(IntPtr.Zero, ref len)) return logical;
+                if (Marshal.GetLastWin32Error() != ERROR_INSUFFICIENT_BUFFER) return logical;
+                IntPtr buf = Marshal.AllocHGlobal((int)len);
+                try
+                {
+                    if (!GetLogicalProcessorInformation(buf, ref len)) return logical;
+                    int size = Marshal.SizeOf(typeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+                    int n = (int)len / size;
+                    int cores = 0;
+                    for (int i = 0; i < n; i++)
+                    {
+                        var e = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION)Marshal.PtrToStructure(
+                            new IntPtr(buf.ToInt64() + (i * size)),
+                            typeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+                        if (e.Relationship == RelationProcessorCore) cores++;
+                    }
+                    return cores > 0 && cores <= logical ? cores : logical;
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+            catch (Exception) { return logical; }
+        }
+    }
+
     public static class SystemMemory
     {
         [StructLayout(LayoutKind.Sequential)]

@@ -112,6 +112,24 @@ namespace IdleGpu
                 rest.Add(args[i]);
             }
 
+            // A CLIENT VERB AFTER THE FLAGS IS STILL A CLIENT VERB.
+            //
+            // MEASURED THE HARD WAY, over SSH on a headless machine: `idlegpu
+            // --config worker.ini services` matched none of the modes below, fell
+            // through to the tray, and started a NotifyIcon on a desktop nobody
+            // was looking at. From the far end that is a command that hangs for
+            // ever with no output and no error, and the only clue is a second
+            // process in the task list. The verb-first form worked; the order was
+            // the whole difference and nothing said so.
+            //
+            // Falling through to the tray is right for a bare `idlegpu`. It is
+            // never right when a verb was named.
+            if (mode == "--tray" && rest.Count > 0 && !rest[0].StartsWith("-"))
+            {
+                BorrowParentConsole();
+                return Cli.Run(rest.ToArray(), cfg);
+            }
+
             if (mode != "--tray") BorrowParentConsole();
 
             if (mode == "--once") return Once(cfg);
@@ -172,6 +190,55 @@ namespace IdleGpu
                     Console.WriteLine("{0,-38} {1,8:N1}%  = {2,5:N2} cores",
                         l.Describe(), pct, pct * cores / 100.0);
                 }
+                // THE DEFECT THAT USED TO BE HERE, proved rather than described.
+                // A row of zero fell through the rate write with a zeroed struct,
+                // and a zeroed ControlFlags CLEARS the cap. Zero is the row a game
+                // produces, so a job about to be stopped ran FLAT OUT for the whole
+                // grace period at the exact moment somebody started a game. Zero
+                // now clamps to one per cent, the smallest cap the kernel accepts.
+                var stopping = new ResourceLimits();
+                stopping.Gpu = false; stopping.CpuPct = 0; stopping.Priority = "idle";
+                runner.ApplyLimits(stopping);
+                System.Threading.Thread.Sleep(700);
+                double zero = MeasureJobPct(runner, 3000, cores);
+                Console.WriteLine("{0,-38} {1,8:N1}%  = {2,5:N2} cores",
+                    "a row of 0 (a job on its way out)", zero, zero * cores / 100.0);
+                Console.WriteLine(zero < 10.0
+                    ? "  -> clamped, not uncapped. Before the fix this read near 100%."
+                    : "  -> WRONG: zero left the job uncapped.");
+
+                // THE YIELD, WHICH IS THE PROMISE. One SetInformationJobObject call
+                // on a live job, sampled every 200 ms until the job is inside the
+                // new cap. This is the second half of Config.FastPollMs plus this;
+                // the tick is the dominant term.
+                Console.WriteLine();
+                var wide = new ResourceLimits();
+                wide.Gpu = true; wide.CpuPct = 100; wide.Priority = "normal";
+                runner.ApplyLimits(wide);
+                System.Threading.Thread.Sleep(1500);
+                var tight = new ResourceLimits();
+                tight.Gpu = true; tight.CpuPct = 5; tight.Priority = "idle";
+                var call = System.Diagnostics.Stopwatch.StartNew();
+                runner.ApplyLimits(tight);
+                long callMs = call.ElapsedMilliseconds;
+                int boundMs = -1;
+                var since = System.Diagnostics.Stopwatch.StartNew();
+                for (int i = 0; i < 25 && boundMs < 0; i++)
+                {
+                    double p = MeasureJobPct(runner, 200, cores);
+                    if (p < 15.0) boundMs = (int)since.ElapsedMilliseconds;
+                }
+                Console.WriteLine("yield: the call to the kernel returned in {0} ms",
+                    callMs.ToString(CultureInfo.InvariantCulture));
+                Console.WriteLine(boundMs >= 0
+                    ? "yield: the job was inside the new cap " + boundMs.ToString(CultureInfo.InvariantCulture) + " ms later"
+                    : "yield: the job did not fall inside the cap within 5 s");
+                Console.WriteLine("yield: add Config.FastPollMs (" +
+                    cfg.FastPollMs.ToString(CultureInfo.InvariantCulture) +
+                    " ms) for the tick that notices the owner; that is the whole promise.");
+                Console.WriteLine("A CPU yield THROTTLES. Nothing above killed the job, so there is no");
+                Console.WriteLine("model to load again and nothing was lost.");
+
                 Console.WriteLine();
                 Console.WriteLine(runner.WorkingSetDenied
                     ? "working set cap: NOT AVAILABLE to this account. " + runner.LastLimitError
@@ -409,6 +476,25 @@ namespace IdleGpu
                             top == null ? "" : top.Pid.ToString(CultureInfo.InvariantCulture),
                             top == null ? "" : Csv(top.Name),
                             top == null ? "0" : top.DedicatedMiB.ToString("0.0", CultureInfo.InvariantCulture),
+                            // The second resource, in the SAME ORDER as
+                            // Replay.Header, which is the only reason a recording
+                            // made here drops into tests/fixtures/ and becomes a
+                            // regression test with nobody transcribing anything.
+                            // An unmeasured sample writes an EMPTY field rather
+                            // than a zero: Replay decides whether the column was
+                            // measured from whether the header names it, and a
+                            // zero here would assert an idle processor and, worse,
+                            // a machine with no free memory at all.
+                            s.Cpu == null || !s.Cpu.Valid ? ""
+                                : s.Cpu.MachinePct.ToString("0.0", CultureInfo.InvariantCulture),
+                            s.Cpu == null || !s.Cpu.Valid ? ""
+                                : s.Cpu.OwnPct.ToString("0.0", CultureInfo.InvariantCulture),
+                            s.Memory == null || !s.Memory.Valid ? ""
+                                : s.Memory.TotalMib.ToString(CultureInfo.InvariantCulture),
+                            s.Memory == null || !s.Memory.Valid ? ""
+                                : s.Memory.AvailableMib.ToString(CultureInfo.InvariantCulture),
+                            s.Memory == null || !s.Memory.Valid ? ""
+                                : s.Memory.LoadPct.ToString(CultureInfo.InvariantCulture),
                             Csv(a.Policy.Last.ReasonText)
                         }));
                         w.Flush();   // survive a hard reboot mid-game, which is the point

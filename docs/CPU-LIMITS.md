@@ -263,7 +263,208 @@ priority plus a duty cycle, because that is all that is portable. On Windows
 specifically there is a kernel-enforced rate cap that is strictly better, and it
 has been there since Windows 8.
 
-## 7. What is not used, and why
+## 7. Busy is split by resource, and that is the whole product
+
+The mechanism above is only half the answer. The other half is a policy defect
+that made it pointless, and it was live.
+
+`Policy.Classify` returns `MachineState.Busy` for **any** tier 1 veto, and the
+Busy row zeroes both columns. So:
+
+- somebody started a Steam game, the GPU veto fired, the whole row went to zero,
+  and the **CPU job was killed for a card it had never opened** - on a machine
+  with twelve threads sitting idle;
+- a sixteen-thread compile forced Busy through the foreign-CPU vote, and the
+  **GPU job was stopped for a processor it was barely using**.
+
+Both directions defeat the point of selling two resources. The fix is small and
+lives in the policy rather than in the grid: the verdict now records **which**
+resource is contended, and when the state is Busy an uncontended resource takes
+its fields from the **light-use** row instead of from Busy's.
+
+| what is happening | the card | the processor |
+|---|---|---|
+| a game | closed | light-use row |
+| a compile | light-use row | Busy row |
+| a game and a compile | closed | Busy row |
+| the agent cannot see the owner | closed | closed |
+
+**Light use and never anything more generous.** A tier 1 veto is the strongest
+evidence this program has that a person is at the machine - stronger than the
+session signals, because a full-screen game leaves `GetLastInputInfo` idle while
+somebody plays it with a controller. So the uncontended resource is not set free;
+it drops to the row for "somebody is here".
+
+**Fail closed.** A Busy that neither flag explains gets the whole Busy row.
+
+**The cooldown remembers which.** The ratchet holds the worst state seen in
+ninety seconds; it now holds the contention with it. Without that, the very next
+clear sample after a game exits would find nothing contended, fall back to light
+use for both, and hand back the card the cooldown exists to withhold.
+
+Tests: `AGameOnTheCardDoesNotStopTheProcessor`, `ACompileDoesNotStopTheCard`,
+`AnUnexplainedBusyGetsTheWholeBusyRow`,
+`TheCooldownRemembersWhichResourceWasContended`.
+
+### One controller per device, not one per machine
+
+`SchedLoop` gated on `if (!JobRunning)`, and `JobRunning` is true when **any**
+runner is running. So a GPU service and a CPU service could never run at the same
+time, which is exactly the product the matrix describes. The gate is now per
+device group: each group has its own busy check, its own verdict and its own
+priority contest, and they share only the memory admission check, because there
+is one pool of system memory and two jobs drawing on it.
+
+## 8. Three defects the mechanism had, found by measuring rather than reading
+
+**A job on its way out was uncapped.** The rate write was guarded by
+`CpuPct > 0 && CpuPct < 100`, so a row of **zero** fell through with a zeroed
+struct - and a zeroed `ControlFlags` **clears** the cap rather than setting it to
+nothing. Zero is the row a game produced. So at the exact moment somebody started
+a game, the job about to be stopped had its cap **removed** and ran flat out for
+the whole grace period while `Stop()` waited for it. `CpuRate = 0` is rejected by
+the kernel with `INVALID_ARGS`, so zero cannot be expressed and now clamps to one
+per cent. Measured with `idlegpu --limits`: **0.4% of the machine, where it used
+to read about 96%.** Test: `AJobBeingStoppedIsNotUncappedOnTheWayOut`.
+
+**OpenMP burned the whole budget spinning.** Torch's OpenMP runtime does not
+sleep a worker when a parallel region ends; it busy-spins for `KMP_BLOCKTIME`
+milliseconds, 200 by default. On an unconstrained machine that is a sensible
+trade. Under a hard cap it is the worst possible behaviour, because the kernel
+counts spinning as work: the job spends its entire budget for the interval doing
+nothing, gets descheduled, and the real work waits for the next one. A ten per
+cent cap stops being a ten per cent slowdown and becomes an arbitrary one.
+`Install.ContainedEnvironment` now sets `OMP_WAIT_POLICY=PASSIVE` and
+`KMP_BLOCKTIME=0` on the child.
+
+**The thread count was frozen at `Process.Start`.** `IDLEGPU_CPU_THREADS` is an
+environment variable, so a job that came up while nobody was signed in kept a
+thread per core after the owner sat down and the cap fell to ten per cent -
+sixteen threads inside 1.6 cores of budget, which is the worst configuration a
+hard cap can be given. The count now travels as a `THREADS n` line on the stdin
+that already carries `YIELD`, and the controller applies it **between** units of
+work, because torch's pool cannot be resized inside a `generate()`.
+
+The cap is the promise and the thread count is the optimisation beside it; they
+are deliberately not the same mechanism. A controller that does not understand
+`THREADS` ignores the line, so a newer agent degrades against an older controller
+rather than killing it.
+
+**At one hundred per cent the answer is physical cores, not logical ones.** The
+NAS thread sweep on this same model: 0.077 realtime at 2 threads, 0.230 at 8,
+0.285 at 16 - per-thread efficiency halving from 2 to 16, which is the signature
+of work bound by single-thread latency rather than throughput. Two sibling
+threads on one core share the L1, the L2 and the front end, and this model's
+whole advantage is a 96 MiB L3 it walks every token. Detected with
+`GetLogicalProcessorInformation`, never assumed, and falling back to the logical
+count when the topology cannot be read.
+
+## 9. Postures, because twenty-five numbers is a form
+
+Five states by six settings is thirty cells, and nobody fills in a form to lend
+somebody a computer. So a **posture** sits on top of the grid: a name, a complete
+matrix, and one sentence saying what it means.
+
+| posture | what it means |
+|---|---|
+| Generous | use it unless I am actually gaming |
+| Balanced (default) | use it while I am away, and stay out of my way when I am here |
+| Only when I am away | never while I am signed in and unlocked |
+
+**Off is not a posture.** `Mode.Off` already means "sell nothing", and a fourth
+matrix by that name would give the runner two encodings of one state and a status
+line reading "Auto, posture Off" that nobody could parse. Mode is the big switch;
+a posture is what Auto *means*. The tray shows them together, because the owner
+is choosing between four answers, but only three of them are matrices.
+
+**Precedence, and it does not depend on line order.** `Profile = <id>` fills every
+cell; any `limits.<state>.<field>` line then overrides that one cell, whether it
+sits above or below. If any override differs, the runner reports the posture as
+`custom` and the tray says "Custom, based on Balanced". Test:
+`AProfileDoesNotDependOnWhereItSitsInTheFile`.
+
+### The ladder is made monotone, because the ratchet assumed it already was
+
+`Policy.Evaluate` holds the worst state seen inside ninety seconds and then looks
+its row up, which takes for granted that a worse state has a smaller row. Nothing
+enforced that. A grid where Busy is more generous than light use - one hand edit,
+one mistyped spinner, one saved custom posture - would **invert the ratchet and
+hand the job more machine at the moment the owner sat down**, which is the exact
+opposite of the only promise this program makes.
+
+Repaired rather than refused: each row is tightened to be no looser than the one
+above it, and the repair is reported. Somebody who mistypes a number must not end
+up with an agent that will not start. Test:
+`AGridThatInvertsTheLadderIsRepairedNotObeyed`.
+
+### Admit, the sixth field
+
+**Keeping a warm job is not the same as inviting a new one.** A CPU yield
+throttles rather than kills, so a job that has already paid its 22 second model
+load and 4.7 GiB of allocation is worth holding at a trickle. Starting a *new*
+one on a machine somebody is using is not. `MinFreeMib` could only have said that
+with a number so large it would have been a lie about memory.
+
+### Three surfaces, one path
+
+The tray changes what you change without stopping what you are doing; the
+settings window holds the whole matrix; a route and a CLI verb do the same
+without a desktop, which is the normal case for an agent running as a boot task
+under SYSTEM. All three arrive at `Agent.DrainCommands`, so the policy thread
+stays the single writer.
+
+    POST /v1/profile   {"profile": "balanced"}
+    POST /v1/limits    {"state": "lightuse", "cpu_pct": 25, "admit": false}
+    idlegpu profile balanced
+    idlegpu limits lightuse cpupct=25 admit=no
+
+**Every surface says what is in force**, not only what is on offer: the tray's
+detail line, a tick on the matching rung, the resolved posture name including
+"based on", and the window's live line. The tray's rung menu is titled with the
+row it edits - `Right now (nobody signed in)` - because the owner reaches for it
+precisely when they can feel the machine, which is the moment they are least
+likely to mean the row they are actually in.
+
+**A RAM figure the kernel refused is greyed, not footnoted.** The working set cap
+needs `SeIncreaseBasePriorityPrivilege`, which SYSTEM has and an ordinary account
+does not, and the kernel refuses it with 1314 rather than failing loudly. A number
+shown while the kernel has refused it is the worst kind of wrong.
+
+## 10. What the processor is actually worth, measured
+
+One real synthesis through the shipped path - the agent, its job object, its cap,
+its admission check - on spring with nobody signed in and no cap in force:
+
+    load                22.3 s, process spawn to model ready
+    audio produced       7.0 s
+    compute             28.97 s
+    realtime factor      0.242x, at 8 threads
+    resident, steady   4,586 MiB
+    resident, peak     7,238 MiB, while the checkpoint is still held
+    machine while it ran  31-47%, which is 8 threads of 16
+
+**The answer is not the flattering one, and it is worth saying plainly.** The
+hypothesis was that a 2022 Zen 3 part with 96 MiB of V-Cache would beat a 2016
+Broadwell-EP at autoregressive batch-one work, possibly by two or three times.
+Measured against the NAS's 0.230x at 8 threads, it does not: **0.242x, about five
+per cent better.** A desktop processor is a *fallback* for when the card is busy,
+not a replacement for it.
+
+That is still worth having, and for a reason the number does not show: it is a
+fallback that **keeps earning while a game has the GPU**, and it degrades instead
+of aborting. A CPU job that has to yield is throttled, not killed, so it finishes
+late rather than not at all.
+
+Two honest caveats:
+
+- 0.242x is at **8 threads with no cap**. Under the light-use row's ten per cent
+  it would be far slower, which is why a router should derate by the published
+  `limits.cpu_pct` before comparing it against anything.
+- The earlier figure of 0.204x was taken at 4 threads before
+  `OMP_WAIT_POLICY=PASSIVE` and the physical-core thread count existed. Those two
+  changes are most of the difference between the two numbers.
+
+## 11. What is not used, and why
 
 **Affinity masks.** `SetProcessAffinityMask`, `JOB_OBJECT_LIMIT_AFFINITY` and
 cpusets are the horizontal answer: they say which cores, not how much. They also

@@ -36,7 +36,7 @@ namespace IdleGpu
         readonly Agent _agent;
         readonly NotifyIcon _icon;
         readonly ToolStripMenuItem _status, _detail, _why, _auto, _always, _off, _counters;
-        readonly ToolStripMenuItem _state, _limits;
+        readonly ToolStripMenuItem _state, _limits, _profile;
         readonly Timer _tick;
         Icon _current;
         SettingsForm _settings;
@@ -56,6 +56,7 @@ namespace IdleGpu
             _state = new ToolStripMenuItem("");
             _state.Enabled = false;
             _limits = new ToolStripMenuItem("Limits");
+            _profile = new ToolStripMenuItem("Posture");
 
             _auto = new ToolStripMenuItem("Auto", null, delegate { SetMode(Mode.Auto); });
             _always = new ToolStripMenuItem("Always on", null, delegate { SetMode(Mode.AlwaysOn); });
@@ -71,6 +72,12 @@ namespace IdleGpu
             menu.Items.Add(_off);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(_state);
+            // TWO LEVELS, ON PURPOSE. Posture is the whole matrix under a name and
+            // it is what most people will ever touch. Limits edits ONE ROW - the
+            // one the machine is in this second - and its header says which,
+            // because the owner reaches for that menu precisely when they can feel
+            // the machine, and that is the row they are least likely to mean.
+            menu.Items.Add(_profile);
             menu.Items.Add(_limits);
             menu.Items.Add(new ToolStripMenuItem("All states and limits...", null,
                 delegate { OpenSettings(); }));
@@ -189,6 +196,7 @@ namespace IdleGpu
                 _detail.Text = Trim(prefix + reason, 60);
 
                 RebuildWhy(_agent.Policy.Last.Reasons, st, overriding);
+                RebuildProfile();
                 RebuildLimits();
 
                 _counters.Text = string.Format(CultureInfo.InvariantCulture,
@@ -237,8 +245,17 @@ namespace IdleGpu
             ResourceLimits cur = _agent.Policy.Limits;
             _state.Text = "Now: " + Config.StateLabel(ms).ToLowerInvariant() + " - " + cur.Describe();
 
+            // THE HEADER NAMES THE ROW, and that is not decoration. RebuildLimits
+            // captures the state the machine is in RIGHT NOW and every rung below
+            // edits THAT row: a change made while the desktop is locked edits the
+            // locked row, and one made while a game is running edits the busy row.
+            // The owner opens this menu exactly when they can feel the machine,
+            // which is the moment they are least likely to mean the row they are
+            // actually in. Anybody who meant the whole posture wants the menu above.
+            _limits.Text = "Right now (" + Config.StateLabel(ms).ToLowerInvariant() + ")";
             _limits.DropDownItems.Clear();
-            var head = new ToolStripMenuItem("While " + Config.StateLabel(ms).ToLowerInvariant() + ":");
+            var head = new ToolStripMenuItem("Changes only this row: "
+                + Config.StateLabel(ms).ToLowerInvariant());
             head.Enabled = false;
             _limits.DropDownItems.Add(head);
 
@@ -276,6 +293,73 @@ namespace IdleGpu
                 _limits.DropDownItems.Add(note);
                 break;
             }
+        }
+
+        /// The whole posture, under a name, with the one in force ticked.
+        ///
+        /// OFF IS IN THIS LIST AND IS NOT A PROFILE. Mode.Off already means "sell
+        /// nothing", and a fourth matrix by that name would give the runner two
+        /// encodings of one state and a status line reading "Auto, posture Off"
+        /// that nobody could parse. So it appears here, beside the three matrices,
+        /// because the owner is choosing between four answers - but the item writes
+        /// Mode.Off rather than a grid.
+        void RebuildProfile()
+        {
+            string eff = _agent.Config.EffectiveProfile();
+            _profile.Text = _agent.Mode == Mode.Off
+                ? "Posture: off"
+                : "Posture: " + _agent.Config.EffectiveProfileLabel();
+            _profile.DropDownItems.Clear();
+
+            foreach (string id in Config.ProfileIds())
+            {
+                string which = id;
+                var it = new ToolStripMenuItem(
+                    Config.ProfileLabel(id) + "  -  " + Config.ProfileBlurb(id), null,
+                    delegate { SetProfile(which); });
+                it.Checked = _agent.Mode != Mode.Off && eff == id;
+                _profile.DropDownItems.Add(it);
+            }
+
+            var off = new ToolStripMenuItem("Off  -  sell nothing", null,
+                delegate { SetMode(Mode.Off); });
+            off.Checked = _agent.Mode == Mode.Off;
+            _profile.DropDownItems.Add(off);
+
+            // Saved postures, if the owner has any. No manager and no deletion
+            // beyond editing worker.ini: this is meant to hold a handful, not to
+            // grow into a library nobody prunes.
+            var saved = new List<string>(_agent.Config.SavedProfiles.Keys);
+            if (saved.Count > 0)
+            {
+                _profile.DropDownItems.Add(new ToolStripSeparator());
+                foreach (string id in saved)
+                {
+                    string which = id;
+                    var it = new ToolStripMenuItem(_agent.Config.AnyProfileLabel(id), null,
+                        delegate { SetProfile(which); });
+                    it.Checked = _agent.Mode != Mode.Off && eff == Config.NormaliseProfile(id);
+                    _profile.DropDownItems.Add(it);
+                }
+            }
+
+            if (eff == "custom" && _agent.Mode != Mode.Off)
+            {
+                _profile.DropDownItems.Add(new ToolStripSeparator());
+                var note = new ToolStripMenuItem(_agent.Config.EffectiveProfileLabel()
+                    + " - open the window to save it under a name");
+                note.Enabled = false;
+                _profile.DropDownItems.Add(note);
+            }
+        }
+
+        void SetProfile(string id)
+        {
+            // Picking a posture while the runner is Off is a request to work
+            // again, not a request to change what Off means.
+            if (_agent.Mode == Mode.Off) { _agent.Mode = Mode.Auto; _agent.SaveMode(); }
+            _agent.SetProfile(id);
+            Refresh();
         }
 
         void SetRung(MachineState st, ResourceLimits r)
