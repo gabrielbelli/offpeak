@@ -36,8 +36,10 @@ namespace IdleGpu
         readonly Agent _agent;
         readonly NotifyIcon _icon;
         readonly ToolStripMenuItem _status, _detail, _why, _auto, _always, _off, _counters;
+        readonly ToolStripMenuItem _state, _limits;
         readonly Timer _tick;
         Icon _current;
+        SettingsForm _settings;
 
         public TrayApp(Agent agent)
         {
@@ -51,6 +53,10 @@ namespace IdleGpu
             _counters = new ToolStripMenuItem("");
             _counters.Enabled = false;
 
+            _state = new ToolStripMenuItem("");
+            _state.Enabled = false;
+            _limits = new ToolStripMenuItem("Limits");
+
             _auto = new ToolStripMenuItem("Auto", null, delegate { SetMode(Mode.Auto); });
             _always = new ToolStripMenuItem("Always on", null, delegate { SetMode(Mode.AlwaysOn); });
             _off = new ToolStripMenuItem("Off", null, delegate { SetMode(Mode.Off); });
@@ -63,6 +69,11 @@ namespace IdleGpu
             menu.Items.Add(_auto);
             menu.Items.Add(_always);
             menu.Items.Add(_off);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(_state);
+            menu.Items.Add(_limits);
+            menu.Items.Add(new ToolStripMenuItem("All states and limits...", null,
+                delegate { OpenSettings(); }));
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(_counters);
             menu.Items.Add(new ToolStripMenuItem("Copy diagnostics", null, delegate
@@ -178,6 +189,7 @@ namespace IdleGpu
                 _detail.Text = Trim(prefix + reason, 60);
 
                 RebuildWhy(_agent.Policy.Last.Reasons, st, overriding);
+                RebuildLimits();
 
                 _counters.Text = string.Format(CultureInfo.InvariantCulture,
                     "{0} started, {1} yielded{2}",
@@ -207,6 +219,80 @@ namespace IdleGpu
                 // string once per tick and SlowLoop writes it to disk, so the tray,
                 // the file and GET /v1/status can never disagree, and no disk write
                 // sits on the yield path.
+            }
+            catch (Exception) { }
+        }
+
+        /// What state the machine is in, what that entitles this runner to, and
+        /// four ways to change it for that state alone.
+        ///
+        /// THE MENU MUST SAY WHAT IS CURRENTLY IN FORCE, not only offer choices. A
+        /// menu of four rungs with no tick on any of them tells the owner nothing
+        /// about what their machine is doing, which is the question they opened it
+        /// to answer. When the row matches no rung it says so and names the
+        /// numbers, rather than pretending one of the four is selected.
+        void RebuildLimits()
+        {
+            MachineState ms = _agent.Policy.MachineState;
+            ResourceLimits cur = _agent.Policy.Limits;
+            _state.Text = "Now: " + Config.StateLabel(ms).ToLowerInvariant() + " - " + cur.Describe();
+
+            _limits.DropDownItems.Clear();
+            var head = new ToolStripMenuItem("While " + Config.StateLabel(ms).ToLowerInvariant() + ":");
+            head.Enabled = false;
+            _limits.DropDownItems.Add(head);
+
+            bool matched = false;
+            for (int i = 0; i < Config.RungNames.Length; i++)
+            {
+                int which = i;
+                ResourceLimits r = Config.Rung(i);
+                var it = new ToolStripMenuItem(Config.RungNames[i] + "  (" + r.Describe() + ")", null,
+                    delegate { SetRung(ms, Config.Rung(which)); });
+                it.Checked = r.SameAs(cur);
+                if (it.Checked) matched = true;
+                _limits.DropDownItems.Add(it);
+            }
+            if (!matched)
+            {
+                _limits.DropDownItems.Add(new ToolStripSeparator());
+                var custom = new ToolStripMenuItem("Custom: " + cur.Describe());
+                custom.Enabled = false;
+                custom.Checked = true;
+                _limits.DropDownItems.Add(custom);
+            }
+
+            // The one thing the owner cannot see from the numbers: whether the
+            // memory cap is actually in force. It needs a privilege an ordinary
+            // account does not have, so a menu that showed "RAM 8192 MiB" while
+            // the kernel had refused it would be the worst kind of wrong.
+            foreach (ServiceDef d in _agent.Services)
+            {
+                JobRunner j = _agent.Runner(d.Id);
+                if (j == null || !j.WorkingSetDenied) continue;
+                _limits.DropDownItems.Add(new ToolStripSeparator());
+                var note = new ToolStripMenuItem("RAM cap unavailable: this account lacks the privilege");
+                note.Enabled = false;
+                _limits.DropDownItems.Add(note);
+                break;
+            }
+        }
+
+        void SetRung(MachineState st, ResourceLimits r)
+        {
+            _agent.SetLimits(st, r);
+            _agent.SaveLimits();
+            Refresh();
+        }
+
+        void OpenSettings()
+        {
+            try
+            {
+                if (_settings != null && !_settings.IsDisposed) { _settings.Activate(); return; }
+                _settings = new SettingsForm(_agent);
+                _settings.FormClosed += delegate { _settings = null; };
+                _settings.Show();
             }
             catch (Exception) { }
         }
@@ -296,6 +382,7 @@ namespace IdleGpu
         void Quit()
         {
             try { _tick.Stop(); } catch (Exception) { }
+            try { if (_settings != null && !_settings.IsDisposed) _settings.Close(); } catch (Exception) { }
             try { _icon.Visible = false; _icon.Dispose(); } catch (Exception) { }
             try { _agent.Dispose(); } catch (Exception) { }
             ExitThread();

@@ -118,6 +118,25 @@ namespace IdleGpu
         /// GPU evidence alone. Three seconds. Short because the cost of being wrong
         /// in this direction is one abandoned job; long enough that a single frame of
         /// a window animation does not trip it.
+        /// How long without input before "signed in" becomes "idle".
+        ///
+        /// Five minutes, matching the shortest screen blank most people leave set,
+        /// so the state the agent calls idle is one the owner would also call
+        /// idle. Shorter reads a pause for thought as absence.
+        public int IdleAfterSeconds = 300;
+
+        /// Foreign CPU, per cent of the whole machine, at which the owner counts
+        /// as busy on the CPU alone.
+        ///
+        /// FOREIGN, not total: our own job's CPU is subtracted exactly from the
+        /// job object's accounting, so this fires on somebody else's compile and
+        /// never on our own load. See CpuSample for why the GPU could not do that.
+        ///
+        /// 40 per cent of sixteen threads is six and a half cores, which no
+        /// desktop reaches by sitting there. Measured on spring's idle desktop the
+        /// whole machine sat under 4 per cent.
+        public double ForeignCpuBusyPct = 40.0;
+
         public int BusyConfirmSamples = 3;
 
         /// How long every signal must stay clear before returning to Available.
@@ -341,6 +360,136 @@ namespace IdleGpu
 
         /// Services, in the order they were declared. One [service.<id>] section
         /// each. See worker.ini.example and docs/ADDING-A-SERVICE.md.
+        /// The limits matrix: one ResourceLimits per MachineState.
+        ///
+        /// EVERY CELL NEEDS A DEFENSIBLE DEFAULT, because most people will never
+        /// open the settings window. These are the defaults and where they come
+        /// from. The CPU numbers are read off probe/p10_felt_hard.cs, which put an
+        /// eight-thread victim at normal priority against sixteen memory-streaming
+        /// threads on spring and measured what the victim lost:
+        ///
+        ///   nothing else running        p50 4.32 ms  p99  7.82 ms  7155 units
+        ///   16 threads at NORMAL        p50 7.90 ms  p99 40.94 ms  1929 units
+        ///   16 threads at IDLE          p50 10.38    p99 13.28     4281 units
+        ///   IDLE + 50% cap              p50 10.38    p99 13.18     4391 units
+        ///   IDLE + 25% cap              p50 5.93     p99 12.53     5701 units
+        ///   IDLE + 10% cap              p50 4.89     p99 11.89     6452 units
+        ///   IDLE +  5% cap              p50 4.74     p99 10.61     6725 units
+        ///
+        /// Two things fall straight out of that table and both shaped these
+        /// defaults. Idle priority alone is NOT enough: it still cost 40 per cent
+        /// of the victim's throughput, because a memory-streaming thread has
+        /// already evicted the victim's cache lines by the time the scheduler
+        /// preempts it. And a 50 per cent cap on sixteen threads is no better than
+        /// no cap at all, because eight streaming threads saturate the memory
+        /// controller on their own. The cap only starts buying anything back at 25
+        /// and is close to invisible at 10.
+        ///
+        /// So LightUse, the one state where somebody is actually at the machine,
+        /// is 10 per cent. Idle is 50, which is a hedge rather than a limit and is
+        /// there so that a job does not have the machine flat out at the moment
+        /// somebody walks back to it.
+        ///
+        /// NOBODY SIGNED IN AND LOCKED ARE DELIBERATELY UNLIMITED, which is the
+        /// owner's own stated default: when nobody is at the machine there is
+        /// nobody to disturb, so there is nothing to throttle. Locked keeps
+        /// below-normal priority as a courtesy to whatever the owner left running,
+        /// a backup or a download, and costs essentially nothing on an idle box.
+        public Dictionary<MachineState, ResourceLimits> Limits = DefaultLimits();
+
+        public static Dictionary<MachineState, ResourceLimits> DefaultLimits()
+        {
+            var d = new Dictionary<MachineState, ResourceLimits>();
+            d[MachineState.NobodyHome] = L(true, 100, "normal", 0, 1024);
+            d[MachineState.Locked] = L(true, 100, "belownormal", 0, 2048);
+            d[MachineState.Idle] = L(true, 50, "idle", 0, 4096);
+            // The working set cap on LightUse is the one that keeps a 6.5 GiB
+            // model out of the owner's way. It does not stop the job allocating,
+            // it stops the job HOLDING: measured, a child that committed 512 MiB
+            // ran to completion with its working set trimmed to 191 MiB under a
+            // 192 MiB limit. The job pages, the owner's browser does not.
+            d[MachineState.LightUse] = L(false, 10, "idle", 8192, 6144);
+            d[MachineState.Busy] = L(false, 0, "idle", 0, 0);
+            return d;
+        }
+
+        /// What Always-on means, and what "nobody is home" ships as. Named rather
+        /// than rebuilt, because it is compared against on every sampling tick.
+        public static readonly ResourceLimits Unlimited = L(true, 100, "normal", 0, 0);
+
+        static ResourceLimits L(bool gpu, int cpu, string prio, int ws, int minFree)
+        {
+            var r = new ResourceLimits();
+            r.Gpu = gpu; r.CpuPct = cpu; r.Priority = prio;
+            r.WorkingSetMib = ws; r.MinFreeMib = minFree;
+            return r;
+        }
+
+        /// The named rungs the tray offers, as data rather than as menu code.
+        ///
+        /// FOUR, NOT A SLIDER. A slider in a tray menu is a target nobody can hit
+        /// with a mouse they are also using to play a game, and the difference
+        /// between 34 and 37 per cent is not one anybody can feel. The numbers come
+        /// from probe/p10_felt_hard.cs: at a 10 per cent cap a foreground workload
+        /// kept 90 per cent of its throughput, at 25 per cent 80 per cent, and at
+        /// 50 per cent the cap bought nothing at all because half a sixteen thread
+        /// machine already saturates the memory controller.
+        ///
+        /// They live here rather than in TrayApp so that the tests can check the
+        /// menu offers something a person can actually reach: a rung list whose
+        /// entries match no shipped default would leave the menu permanently
+        /// showing "Custom", which tells the owner nothing about their machine.
+        public static string[] RungNames = new string[]
+            { "Take the whole machine", "Take most of it", "Stay out of the way", "Nothing at all" };
+
+        public static ResourceLimits Rung(int i)
+        {
+            if (i == 0) return L(true, 100, "normal", 0, 1024);
+            if (i == 1) return L(true, 50, "belownormal", 0, 2048);
+            if (i == 2) return L(true, 10, "idle", 8192, 6144);
+            return L(false, 0, "idle", 0, 0);
+        }
+
+        public ResourceLimits LimitsFor(MachineState st)
+        {
+            ResourceLimits r;
+            if (Limits != null && Limits.TryGetValue(st, out r) && r != null) return r;
+            // A row nobody configured is the most restrictive row, never the most
+            // generous one. Missing configuration must not read as permission.
+            return L(false, 0, "idle", 0, 0);
+        }
+
+        public static string StateKey(MachineState st)
+        {
+            switch (st)
+            {
+                case MachineState.NobodyHome: return "nobodyhome";
+                case MachineState.Locked: return "locked";
+                case MachineState.Idle: return "idle";
+                case MachineState.LightUse: return "lightuse";
+                default: return "busy";
+            }
+        }
+
+        /// The label a person sees, in the settings window and in the tray.
+        public static string StateLabel(MachineState st)
+        {
+            switch (st)
+            {
+                case MachineState.NobodyHome: return "Nobody signed in";
+                case MachineState.Locked: return "Signed in, locked";
+                case MachineState.Idle: return "Signed in, idle";
+                case MachineState.LightUse: return "Signed in, light use";
+                default: return "Busy or gaming";
+            }
+        }
+
+        public static MachineState[] AllStates()
+        {
+            return new MachineState[] { MachineState.NobodyHome, MachineState.Locked,
+                MachineState.Idle, MachineState.LightUse, MachineState.Busy };
+        }
+
         public List<ServiceDef> Services = new List<ServiceDef>();
 
         public ServiceDef Service(string id)
@@ -495,6 +644,8 @@ namespace IdleGpu
                 case "installdir": s.InstallDir = v; break;
                 case "readymarker": s.ReadyMarker = v; break;
                 case "sizehint": s.SizeHint = v; break;
+                case "device": s.Device = v; break;
+                case "needsmemorymib": s.NeedsMemoryMib = int.Parse(v, CultureInfo.InvariantCulture); break;
             }
         }
 
@@ -527,6 +678,8 @@ namespace IdleGpu
                 case "counterpollms": c.CounterPollMs = int.Parse(v, CultureInfo.InvariantCulture); break;
                 case "yieldgraceseconds": c.YieldGraceSeconds = int.Parse(v, CultureInfo.InvariantCulture); break;
                 case "schedulerpollms": c.SchedulerPollMs = int.Parse(v, CultureInfo.InvariantCulture); break;
+                case "idleafterseconds": c.IdleAfterSeconds = int.Parse(v, CultureInfo.InvariantCulture); break;
+                case "foreigncpubusypct": c.ForeignCpuBusyPct = double.Parse(v, CultureInfo.InvariantCulture); break;
                 case "gameprocessnames": c.GameProcessNames = Split(v); break;
                 case "vramallowlist": c.VramAllowlist = Split(v); break;
                 case "idlepstates": c.IdlePStates = Split(v); break;
@@ -564,7 +717,57 @@ namespace IdleGpu
                 case "clienthost": c.ClientHost = v; break;
                 case "clientport": c.ClientPort = int.Parse(v, CultureInfo.InvariantCulture); break;
                 case "certfingerprint": c.CertFingerprint = v; break;
+
+                // The limits matrix. Flat keys rather than real sections, because
+                // the parser deliberately treats section headers as decoration -
+                // see Load - and one more special case in it is one more thing
+                // that can go wrong in a file somebody edits at 2am.
+                //
+                //   limits.lightuse.cpupct = 10
+                //   limits.locked.gpu      = yes
+                default: ApplyLimit(c, k, v); break;
             }
+        }
+
+        /// limits.<state>.<field>. Unknown states and unknown fields are ignored
+        /// rather than throwing, on the same rule as every other line: a bad line
+        /// must not stop the agent starting.
+        static void ApplyLimit(Config c, string k, string v)
+        {
+            if (!k.StartsWith("limits.", StringComparison.Ordinal)) return;
+            string[] parts = k.Split('.');
+            if (parts.Length != 3) return;
+            MachineState st = MachineState.Busy;
+            bool found = false;
+            foreach (MachineState s in AllStates())
+                if (StateKey(s) == parts[1]) { st = s; found = true; break; }
+            if (!found) return;
+            ResourceLimits r;
+            if (!c.Limits.TryGetValue(st, out r) || r == null)
+            {
+                r = new ResourceLimits(); c.Limits[st] = r;
+            }
+            switch (parts[2])
+            {
+                case "gpu": r.Gpu = Truthy(v); break;
+                case "cpupct": r.CpuPct = Clamp(int.Parse(v, CultureInfo.InvariantCulture), 0, 100); break;
+                case "priority": r.Priority = NormalisePriority(v); break;
+                case "workingsetmib": r.WorkingSetMib = Math.Max(0, int.Parse(v, CultureInfo.InvariantCulture)); break;
+                case "minfreemib": r.MinFreeMib = Math.Max(0, int.Parse(v, CultureInfo.InvariantCulture)); break;
+            }
+        }
+
+        static int Clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+        /// One spelling, whatever was typed. An unrecognised value becomes "idle"
+        /// rather than "normal": a typo in a settings file must not quietly hand
+        /// the machine over.
+        public static string NormalisePriority(string v)
+        {
+            string t = (v ?? "").Trim().ToLowerInvariant().Replace(" ", "").Replace("_", "");
+            if (t == "normal") return "normal";
+            if (t == "belownormal" || t == "below" || t == "low") return "belownormal";
+            return "idle";
         }
 
         // -- CLI client settings -------------------------------------------------
@@ -612,6 +815,33 @@ namespace IdleGpu
         /// chunk in flight in well under a second; a Hashcat controller has to
         /// write a restore file first and needs longer.
         public int YieldGraceSeconds = 0;
+
+        /// Which resource this service is actually after.
+        ///
+        /// Read from the manifest's own `device` field, which chatterbox already
+        /// publishes, so the runner does not have to be told twice. It decides
+        /// which gate the scheduler puts the service behind: a GPU service waits
+        /// for the GPU detector, a CPU service waits only for the matrix row, and
+        /// before this distinction existed a CPU-only speech job sat out a ninety
+        /// second cooldown caused by a game on a card it never touched.
+        public string Device = "gpu";
+
+        public bool WantsGpu
+        {
+            get
+            {
+                string d = (Device ?? "gpu").Trim().ToLowerInvariant();
+                return d != "cpu" && d != "none" && d != "fake";
+            }
+        }
+
+        /// Roughly how much system memory this service needs resident, in MiB, for
+        /// the admission check. 0 means it has not said.
+        ///
+        /// Chatterbox on the CPU is about 6,500 MiB measured, which on a 31.9 GiB
+        /// machine is a fifth of it. That is not a number to discover by watching
+        /// somebody's browser start swapping.
+        public int NeedsMemoryMib;
 
         // -- Opting in -----------------------------------------------------------
         //

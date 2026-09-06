@@ -55,7 +55,10 @@ namespace IdleGpu
     {
         readonly Config _c;
         int _busyStreak;
+        int _cpuBusyStreak;
         DateTime _lastWanted = DateTime.MinValue;
+        MachineState _worstRecent = MachineState.Busy;
+        DateTime _worstRecentAt = DateTime.MinValue;
         DateTime _now = DateTime.MinValue;
         WorkerState _state = WorkerState.Blocked;
 
@@ -69,6 +72,10 @@ namespace IdleGpu
 
         public WorkerState State { get { return _state; } }
         public Verdict Last = new Verdict();
+
+        /// The row of the matrix in force right now. Never null.
+        public ResourceLimits Limits { get { return Last.Limits; } }
+        public MachineState MachineState { get { return Last.MachineState; } }
 
         public int SecondsUntilAvailable
         {
@@ -113,6 +120,45 @@ namespace IdleGpu
             foreign.Sort(delegate(ProcessGpuUse a, ProcessGpuUse b)
                 { return b.DedicatedMiB.CompareTo(a.DedicatedMiB); });
             return foreign;
+        }
+
+        /// Which row of the matrix this instant lands on.
+        ///
+        /// TAKEN AFTER THE VETOES ARE KNOWN, not before, because "a game exists"
+        /// is the strongest evidence there is that somebody is at the machine and
+        /// it is evidence the session signals do not carry: a full-screen game
+        /// leaves GetLastInputInfo idle while somebody plays it with a controller.
+        ///
+        /// BLIND IS BUSY. The tier 0 checks mean the agent has lost the ability to
+        /// see the user coming, and the correct row for "I cannot tell" is the one
+        /// that takes nothing. Missing information must never read as permission.
+        static MachineState Classify(Snapshot s, Verdict v, Config c, out string why)
+        {
+            if (v.Blind) { why = "cannot see whether anybody is at this machine"; return MachineState.Busy; }
+            if (v.IsVeto) { why = v.ReasonText; return MachineState.Busy; }
+
+            SessionSignals ss = s.Session;
+            if (ss == null) { why = "no session signals"; return MachineState.Busy; }
+
+            if (!ss.HasConsoleUser) { why = "nobody is signed in"; return MachineState.NobodyHome; }
+            if (ss.Locked) { why = "the desktop is locked"; return MachineState.Locked; }
+
+            // Can we see input at all. From session 0 GetLastInputInfo answers for
+            // the CALLING session and reports a number that is a lie about the
+            // user, so the boot agent only has this through the logon helper. When
+            // it is missing the answer is LightUse, the careful row, and never
+            // Idle: an unmeasurable idle time is not a measured one.
+            bool canSeeInput = ss.RunningInConsoleSession || ss.PresenceFresh;
+            if (canSeeInput && ss.InputIdleSeconds >= 0 && ss.InputIdleSeconds >= c.IdleAfterSeconds)
+            {
+                why = string.Format(CultureInfo.InvariantCulture,
+                    "signed in, no input for {0}s", ss.InputIdleSeconds);
+                return MachineState.Idle;
+            }
+            why = canSeeInput
+                ? "signed in and using the machine"
+                : "signed in, and this agent cannot measure input idle time from its session";
+            return MachineState.LightUse;
         }
 
         public Verdict Evaluate(Snapshot s)
@@ -295,6 +341,69 @@ namespace IdleGpu
             }
             if (v.IsVeto) _busyStreak = 0;
 
+            // --- THE CPU'S OWN LOAD VOTE ---------------------------------------
+            //
+            // Deliberately NOT symmetrical with the GPU's tier 2, and the
+            // difference is the point. The GPU's load votes have to be SUPPRESSED
+            // while our own job runs, because a whole-card reading has no owner
+            // attached to it and the agent ended up yielding to the load it had
+            // itself created. Measured: four restarts in a row on a locked desktop
+            // with nobody near the machine.
+            //
+            // The CPU does not have that problem, because a job object accounts
+            // for its own processes exactly. CpuSample.ForeignPct is machine CPU
+            // minus our own, so this fires on somebody else's compile and cannot
+            // fire on ours. That is strictly better than suppression: the agent
+            // keeps a working CPU signal WHILE a job is running, which the GPU
+            // still cannot do.
+            //
+            // It votes rather than vetoing, on the same three-sample confirmation
+            // as the GPU's tier 2, because one sample over the line is a Windows
+            // Update check and not a person.
+            if (s.Cpu != null && s.Cpu.Valid && s.Cpu.ForeignPct > _c.ForeignCpuBusyPct)
+            {
+                _cpuBusyStreak++;
+                if (_cpuBusyStreak >= _c.BusyConfirmSamples)
+                    v.Reasons.Add(string.Format(CultureInfo.InvariantCulture,
+                        "{0:N0}% of this machine's CPU is somebody else's work", s.Cpu.ForeignPct));
+            }
+            else _cpuBusyStreak = 0;
+
+            bool cpuBusy = _cpuBusyStreak >= _c.BusyConfirmSamples;
+
+            // --- which row of the matrix ---------------------------------------
+
+            string stateWhy;
+            MachineState now = Classify(s, v, _c, out stateWhy);
+            if (cpuBusy && now < MachineState.Busy)
+            {
+                now = MachineState.Busy;
+                stateWhy = "somebody else is using this machine's CPU";
+            }
+
+            // RESTRICT INSTANTLY, RELAX SLOWLY, on the same clock as the GPU's
+            // cooldown. Tightening a cap costs nothing and must happen the moment
+            // the owner appears; loosening it again the moment they pause is how
+            // you get a machine that surges every time somebody stops typing to
+            // read a paragraph. So the effective row is the most restrictive one
+            // seen inside ClearCooldownSeconds.
+            if (_worstRecentAt == DateTime.MinValue || now >= _worstRecent)
+            {
+                _worstRecent = now; _worstRecentAt = s.At;
+            }
+            else if ((s.At - _worstRecentAt).TotalSeconds >= _c.ClearCooldownSeconds)
+            {
+                _worstRecent = now; _worstRecentAt = s.At;
+            }
+            MachineState effective = now >= _worstRecent ? now : _worstRecent;
+
+            v.MachineState = effective;
+            v.Limits = _c.LimitsFor(effective);
+            v.StateReason = effective == now
+                ? stateWhy
+                : stateWhy + "; holding " + Config.StateLabel(effective).ToLowerInvariant()
+                  + " until the cooldown expires";
+
             // --- state machine ------------------------------------------------
 
             if (v.WantsGpu) _lastWanted = s.At;
@@ -320,6 +429,34 @@ namespace IdleGpu
             return _state == WorkerState.Available;
         }
 
+        /// May a service that wants the GPU run right now.
+        ///
+        /// The GPU detector is still the gate, exactly as before; the matrix's GPU
+        /// column is an EXTRA veto on top of it, and it ships as yes in every row
+        /// but Busy so that installing this release changes nobody's behaviour.
+        /// It exists so an owner can say "not while I am at the machine, even if
+        /// it looks idle", which the detector alone cannot express.
+        public bool CanRunGpu(Mode mode)
+        {
+            if (!CanRun(mode)) return false;
+            if (mode == Mode.AlwaysOn) return true;
+            return Last.Limits == null || Last.Limits.Gpu;
+        }
+
+        /// May a service that wants only the CPU run right now.
+        ///
+        /// Note what is NOT here: WorkerState. A CPU service does not care that a
+        /// game owns the GPU, it cares that the owner is at the machine, and that
+        /// is what the matrix row says. Reusing the GPU's Available would have
+        /// made every CPU job wait out a ninety second cooldown for a card it
+        /// never touches.
+        public bool CanRunCpu(Mode mode)
+        {
+            if (mode == Mode.Off) return false;
+            if (mode == Mode.AlwaysOn) return true;
+            return Last.Limits != null && Last.Limits.CpuPct > 0;
+        }
+
         /// True when the user's chosen mode is running a job that the detector
         /// would have stopped.
         ///
@@ -337,6 +474,35 @@ namespace IdleGpu
         public bool IsOverriding(Mode mode)
         {
             return mode == Mode.AlwaysOn && _state != WorkerState.Available;
+        }
+
+        /// The admission check, as arithmetic, so it is testable without a machine.
+        ///
+        /// WHY ADMISSION AND NOT ONLY A CAP. They answer different questions. A
+        /// working set cap contains a job that has already started; it cannot undo
+        /// the moment where a 6.5 GiB model loads onto a machine with 2 GiB spare
+        /// and the owner's browser goes to disk. A job not started costs a wait; a
+        /// job started on a machine with no headroom costs the owner their session.
+        ///
+        /// UNMEASURABLE IS NOT A VETO, which is the opposite of the rule tier 0
+        /// uses for the GPU, and deliberately so. Blindness about the USER must
+        /// fail closed because the cost of being wrong is somebody's match.
+        /// Blindness about free memory must fail open, because the cost of being
+        /// wrong is a runner that never starts anything on a machine whose memory
+        /// counter is unavailable, and that is a worse failure than a job that is
+        /// occasionally started at a bad moment.
+        public static bool MemoryAllows(long availableMib, bool availableKnown,
+                                        int minFreeMib, int needsMib, out string why)
+        {
+            why = "";
+            if (minFreeMib <= 0) return true;
+            if (!availableKnown) return true;
+            long need = minFreeMib + (needsMib > 0 ? needsMib : 0);
+            if (availableMib >= need) return true;
+            why = string.Format(CultureInfo.InvariantCulture,
+                "only {0:N0} MiB of memory is free and this needs {1:N0} MiB of headroom",
+                availableMib, need);
+            return false;
         }
 
         public static string Describe(WorkerState st)

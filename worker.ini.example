@@ -161,6 +161,129 @@ SchedulerPollMs      = 500
 
 
 # =====================================================================
+# [limits]  what this machine gives up, state by state and resource by resource
+# =====================================================================
+#
+# The tray and the settings window write this section. It is safe to edit by
+# hand; the settings window rewrites the whole block and leaves every other line
+# in this file alone.
+#
+# FIVE STATES. The machine is always in exactly one of them, and each one is
+# decidable from a signal that exists rather than from a guess:
+#
+#   nobodyhome  no console user at all: the sign-in screen, or after a boot and
+#               before anybody logs in. Most of a gaming PC's uptime.
+#   locked      somebody is signed in and the desktop is locked.
+#   idle        signed in, unlocked, and no keyboard or mouse for
+#               IdleAfterSeconds. An agent at boot lives in session 0 and cannot
+#               measure this on its own, so without the logon helper reporting
+#               it this reads as lightuse, never as idle.
+#   lightuse    signed in, unlocked, and using the machine. Reading, typing, a
+#               browser. This is the only state the CPU ladder has to be careful
+#               in, which is why the defaults are careful only here.
+#   busy        a game exists, or somebody else's work is using the CPU. Steam
+#               has a running app, the anti-cheat service is up, a named game
+#               process exists, another process holds VRAM, the foreground
+#               window is full screen, or foreign CPU is over ForeignCpuBusyPct
+#               for BusyConfirmSamples in a row.
+#
+# FIVE SETTINGS PER STATE.
+#
+#   gpu             may a service that wants the card run at all. The GPU's own
+#                   detector is still the gate; this is an extra veto on top of
+#                   it, so "yes" means "today's behaviour" and "no" means "not
+#                   even if it looks free".
+#   cpupct          a HARD CAP as a share of the WHOLE MACHINE, not of one core.
+#                   Measured on a 16 thread desktop: 50 gave 8.03 cores, 10 gave
+#                   1.48. It says how much, never which cores.
+#                   0 means DO NOT RUN. Windows rejects a rate of zero, so zero
+#                   has to mean stop rather than "capped to nothing".
+#   priority        normal, belownormal or idle. Necessary and not sufficient:
+#                   against a memory-heavy background job, idle priority ALONE
+#                   still cost a foreground workload 40 per cent of its
+#                   throughput, because cache eviction has already happened by
+#                   the time the scheduler preempts. Use it with a cap.
+#   workingsetmib   a ceiling on how much memory the job may hold RESIDENT. Over
+#                   it, the JOB is trimmed and pages, rather than the owner's
+#                   browser. 0 means no ceiling. Deliberately not a commit cap:
+#                   a commit cap kills the job instead of squeezing it, measured
+#                   as an access violation rather than a catchable error.
+#                   Needs SeIncreaseBasePriorityPrivilege. The agent has it as
+#                   SYSTEM; run by hand as an ordinary user it does not, and the
+#                   tray says so instead of pretending the cap is in force.
+#   minfreemib      an admission check. A job is not STARTED when free physical
+#                   memory is already below this plus whatever the service says
+#                   it needs. A job not started costs a wait; a job started on a
+#                   machine with no headroom costs the owner their session.
+#
+# Delete any line to get its default back. Delete the whole section for all of
+# them. The numbers below ARE the defaults.
+
+# How long without input before "signed in" becomes "idle". Five minutes matches
+# the shortest screen blank most people leave set, so the state this calls idle
+# is one the owner would also call idle.
+IdleAfterSeconds     = 300
+# Foreign CPU, per cent of the whole machine, at which somebody else counts as
+# using it. FOREIGN: our own job's CPU is subtracted exactly from the job
+# object's own accounting, so this fires on somebody else's compile and can never
+# fire on ours. Set it to 101 to switch the CPU load signal off entirely.
+ForeignCpuBusyPct    = 40
+
+# Nobody signed in: the machine is entirely free, and there is nobody to be
+# polite to.
+limits.nobodyhome.gpu           = yes
+limits.nobodyhome.cpupct        = 100
+limits.nobodyhome.priority      = normal
+limits.nobodyhome.workingsetmib = 0
+limits.nobodyhome.minfreemib    = 1024
+
+# Signed in but locked: nobody is at it either, so nearly as free. Below normal
+# priority is a courtesy to whatever the owner left running, a backup or a
+# download, and costs essentially nothing on an idle box.
+limits.locked.gpu               = yes
+limits.locked.cpupct            = 100
+limits.locked.priority          = belownormal
+limits.locked.workingsetmib     = 0
+limits.locked.minfreemib        = 2048
+
+# Signed in and idle: at the machine but not touching it. The cap is a hedge
+# rather than a limit; it is here so a job does not have the machine flat out at
+# the moment somebody puts their hand back on the mouse.
+limits.idle.gpu                 = yes
+limits.idle.cpupct              = 50
+limits.idle.priority            = idle
+limits.idle.workingsetmib       = 0
+limits.idle.minfreemib          = 4096
+
+# Light use: the one state where somebody is actually there. Measured against an
+# eight thread foreground workload and a memory-heavy background job on a 16
+# thread desktop:
+#
+#   nothing running     median 4.32 ms per unit    7155 units
+#   idle priority only  median 10.38 ms            4281 units
+#   idle + 50% cap      median 10.38 ms            4391 units   50% buys nothing
+#   idle + 25% cap      median 5.93 ms             5701 units
+#   idle + 10% cap      median 4.89 ms             6452 units   90% of an idle box
+#
+# So 10 and not 25, and idle priority as well as the cap rather than instead of
+# it. The working set ceiling is against runaway growth rather than a squeeze:
+# chatterbox on the CPU was measured at 4,701 MiB resident after loading, so
+# 8192 does not normally bind.
+limits.lightuse.gpu             = yes
+limits.lightuse.cpupct          = 10
+limits.lightuse.priority        = idle
+limits.lightuse.workingsetmib   = 8192
+limits.lightuse.minfreemib      = 6144
+
+# Busy or gaming: absolutely hands off.
+limits.busy.gpu                 = no
+limits.busy.cpupct              = 0
+limits.busy.priority            = idle
+limits.busy.workingsetmib       = 0
+limits.busy.minfreemib          = 0
+
+
+# =====================================================================
 # [service.<id>]  what this runner can do
 # =====================================================================
 #
@@ -216,6 +339,19 @@ SizeHint             = about 8.1 GB (5.0 GB of torch cu126 and friends, 3.0 GB o
 Provision            = chatterbox\provision.ps1
 Command              = %RUNTIME%\chatterbox\venv\Scripts\python.exe
 Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%"
+# Which gate the scheduler puts this behind: gpu waits for the GPU detector, cpu
+# waits only for the limits matrix. A CPU service used to sit out a ninety second
+# cooldown caused by a game on a card it never touched.
+#
+# The controller itself takes --device auto by default, so it uses the card when
+# there is one and the processor when there is not, and publishes which in its
+# manifest. Set this to cpu if you want to sell the processor on a machine that
+# also has a card you are keeping for yourself.
+Device               = gpu
+# Roughly how much system memory this needs resident, for the admission check.
+# Measured on a Ryzen 7 5700X3D with 31.9 GiB: 4,701 MiB after the model loaded,
+# on the CPU. Rounded up, because generation takes more than loading does.
+NeedsMemoryMib       = 6144
 
 # %RUNTIME%, %SCRIPTS% and %QUEUE% above are expanded by the agent, so this file
 # has no absolute path in it and works unedited on anybody's machine:

@@ -24,6 +24,7 @@ idlegpu submit echo --body-file job.json --wait
 - [What this actually is](#what-this-actually-is)
 - [The hard part, and why the obvious answer fails](#the-hard-part-and-why-the-obvious-answer-fails)
 - [The policy: a ladder, not a threshold](#the-policy-a-ladder-not-a-threshold)
+- [Selling the processor too, and how it is limited](#selling-the-processor-too-and-how-it-is-limited)
 - [Nothing is installed until you ask](#nothing-is-installed-until-you-ask)
 - [What it costs on disk](#what-it-costs-on-disk)
 - [Install](#install)
@@ -179,6 +180,91 @@ clear**. Ninety seconds is longer than a level load, longer than alt-tabbing to 
 browser mid-match, and longer than the gap between two rounds.
 
 A false busy costs one job. A false idle costs somebody their game.
+
+---
+
+## Selling the processor too, and how it is limited
+
+The card is not the only thing sitting idle. A game takes the GPU and leaves
+twelve threads doing nothing; a compile takes every thread and leaves the card at
+five per cent. So the two are sold separately, and what this machine gives up is
+a small matrix rather than a switch.
+
+**Five states, and each one is decidable from a signal that exists.**
+
+| The machine is | which means | and the defaults give up |
+|---|---|---|
+| Nobody signed in | no console user at all | everything |
+| Signed in, locked | nobody is at the keyboard | everything, at below-normal priority |
+| Signed in, idle | no input for five minutes | the GPU, and half the CPU |
+| Signed in, light use | reading, typing, a browser | the GPU, and a tenth of the CPU |
+| Busy or gaming | a game exists, or somebody else's work is on the CPU | nothing |
+
+**Locked or signed out means unlimited, by default.** When nobody is at the
+machine there is nobody to disturb, so there is nothing to throttle. It is a
+default and not a law: turn it down like anything else if you leave a machine
+locked while a scheduled task runs.
+
+**The limit is vertical, not horizontal.** It says how much of the machine, never
+which cores. `JOB_OBJECT_CPU_RATE_CONTROL_INFORMATION` with a hard cap, on the
+job object the agent already creates, measured on a 16 thread desktop: a 50 per
+cent cap produced 8.03 cores of work, a 10 per cent cap produced 1.48. Nothing is
+pinned to a core and the scheduler keeps its own placement.
+
+**Priority alone is not enough, and that was measured rather than assumed.**
+Against a memory-heavy background job, idle priority by itself still cost a
+foreground workload 40 per cent of its throughput, because the cache lines are
+already evicted by the time the scheduler preempts. So it is idle priority AND a
+low cap. At a 10 per cent cap the foreground workload kept 90 per cent of the
+throughput it had on a completely idle machine.
+
+**Memory is the third resource and on this workload it may matter most.**
+Chatterbox is about 4.7 GiB resident. Two things guard it, and they answer
+different questions:
+
+- **an admission check**, which refuses to START a job when free memory is
+  already low, because a job not started costs a wait and a job started on a full
+  machine costs the owner their session;
+- **a working set ceiling**, which trims the JOB rather than the system, so the
+  job pages instead of your browser.
+
+Deliberately **not** a commit cap. `JOB_OBJECT_LIMIT_JOB_MEMORY` was measured
+killing the child with an access violation rather than squeezing it, and a
+limiter that kills the job is a different product.
+
+### Changing it, while something is running
+
+Everything above moves on a **live** job object. Measured: the cap dropped from
+80 per cent to 5 and the job was under 10 per cent within the first 200 ms
+sampling window; raised back to 90 and over 50 per cent again within 828 ms;
+cleared entirely and back to full speed.
+
+So the CPU promise is **one sampling tick plus about 200 ms**, under a second and
+a half from a keystroke to a throttled job, and unlike the GPU it costs nothing,
+because the job is squeezed rather than killed and there is no model to load
+again.
+
+Two places to change it:
+
+- **the tray**, for the state you are in right now: four named rungs, one click,
+  and the menu says what is currently in force rather than only offering choices;
+- **the settings window**, `All states and limits...`, for the whole matrix seen
+  at once.
+
+Both bind immediately and both are written back to `worker.ini`, so nothing
+resets at the next login.
+
+### Checking it on your machine
+
+    idlegpu --limits
+
+Runs the same code the tray runs against a real job object for about fifty
+seconds, prints the measured share of your machine at each rung, and says whether
+the memory cap is available to your account. It exits on its own.
+
+The numbers in this README came from one desktop, an AMD Ryzen 7 5700X3D with
+31.9 GiB running Windows 11. `docs/CPU-LIMITS.md` has the full measurements, what
+was rejected and why, and the prior art.
 
 ---
 
@@ -625,6 +711,13 @@ a chunked body is refused, not misread
 a malformed body is refused at submit
 every cache variable points inside the contained directory
 a service section is known, not installed
+signing in ends unlimited on the very next sample
+an idle time this agent cannot see is never Idle
+a CPU cap of zero means stop, not unlimited
+our own CPU load is subtracted, not mistaken for a user
+a CPU service does not wait out a GPU cooldown
+a 6.5 GiB job is not started on a machine with 2 GiB spare
+the shipped caps are the ones that were measured
 ```
 
 Fixtures are twelve generated CSVs plus **two real recordings** from the test
@@ -636,25 +729,29 @@ is drawn, in its docstring.
 ## Layout
 
 ```
-src/            the agent. 3,500 lines of C# 5, built by the csc.exe inside Windows
+src/            the agent. C# 5, built by the csc.exe inside Windows
   Model.cs        pure data, no platform dependency, so the policy is testable
-  Policy.cs       the ladder. Takes its clock from the snapshot, never from now
-  Signals.cs      nvidia-smi, PDH counters, session, launchers
-  Agent.cs        three threads, and the job object that supervises a controller
+  Policy.cs       the ladder, the machine states, and the limits in force
+  Config.cs       worker.ini, and the limits matrix with its measured defaults
+  Signals.cs      nvidia-smi, PDH counters, CPU, memory, session, launchers
+  Agent.cs        three threads, and the job object that caps and supervises
   Listener.cs     TcpListener + SslStream
   Http.cs         hand-written HTTP/1.1 framing, and what it refuses
   Api.cs          the routes and the two auth checks
   Jobs.cs         the directory queue and the content-addressed asset store
   Install.cs      opting in: the three states, disk cost, reclaiming
   Cli.cs          the client
+  TrayApp.cs      the icon, the Why submenu and the four named rungs
+  SettingsForm.cs the whole matrix, seen at once
 services/       one directory per service. NONE is installed by default
   lib/            the directory protocol, written once, for Python controllers
   echo/           needs no GPU. Install this first
   chatterbox/     speech. About 6.3 GB
-tests/          172 assertions, no network
+tests/          261 assertions, no network, no GPU, no console session
 tools/          loadgen and a fake job, for exercising the yield path
-probe/          seven read-only probes that produced every number in this README
-docs/           ADDING-A-SERVICE.md, ROADMAP.md
+probe/          ten probes that produced every number in this README and in
+                docs/CPU-LIMITS.md. p8, p9, p10 and p11 are the CPU and memory ones
+docs/           ADDING-A-SERVICE.md, CPU-LIMITS.md, ROADMAP.md
 ```
 
 ---

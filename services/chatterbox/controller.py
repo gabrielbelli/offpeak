@@ -51,7 +51,52 @@ import idlegpu_service as svc                                   # noqa: E402
 DEFAULT_SAMPLE_RATE = 24000
 
 
-def manifest(sample_rate, device, unit_seconds, vram_mib):
+def _rss_mib():
+    """Resident set of this process, in MiB, with no third party dependency.
+
+    GetProcessMemoryInfo through ctypes on Windows, /proc/self/statm elsewhere.
+    psutil would be one line and one more package in a contained runtime that
+    currently needs none.
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            class PMC(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD),
+                            ("PageFaultCount", wintypes.DWORD),
+                            ("PeakWorkingSetSize", ctypes.c_size_t),
+                            ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t),
+                            ("PeakPagefileUsage", ctypes.c_size_t)]
+
+            pmc = PMC()
+            pmc.cb = ctypes.sizeof(PMC)
+            # THE CURRENT-PROCESS PSEUDO-HANDLE, WRITTEN OUT RATHER THAN CALLED
+            # FOR. GetCurrentProcess returns (HANDLE)-1, and ctypes defaults every
+            # return value to a 32 bit int; taking it back as a Python integer
+            # gives 0xFFFFFFFFFFFFFFFF, which then fails to convert on the way
+            # into the next call with "int too long". Measured: memory_mib was
+            # published as 0 either way, silently, which would have told the
+            # runner's admission check that a 6.5 GiB job needs nothing.
+            proc = ctypes.windll.psapi.GetProcessMemoryInfo
+            proc.argtypes = [ctypes.c_void_p, ctypes.POINTER(PMC), wintypes.DWORD]
+            proc.restype = wintypes.BOOL
+            if proc(ctypes.c_void_p(-1), ctypes.byref(pmc), pmc.cb):
+                return int(pmc.WorkingSetSize / 2 ** 20)
+            return 0
+        with open("/proc/self/statm", "r") as fh:
+            return int(int(fh.read().split()[1]) * os.sysconf("SC_PAGESIZE") / 2 ** 20)
+    except Exception:
+        return 0
+
+
+def manifest(sample_rate, device, unit_seconds, vram_mib, rss_mib=0):
     return {
         "id": "chatterbox",
         "description": "Chatterbox multilingual text to speech, one segment per unit of work",
@@ -63,6 +108,10 @@ def manifest(sample_rate, device, unit_seconds, vram_mib):
         "interruptible": "between-units",
         "unit_seconds": unit_seconds,
         "vram_mib": vram_mib,
+        # System memory this actually took, measured after the model loaded. The
+        # runner's admission check reads it to decide whether starting this on a
+        # machine somebody is using would push it into paging.
+        "memory_mib": rss_mib,
         "outputs": "audio/pcm-f32@%d" % sample_rate,
         "checkpointable": False,
         "device": device,
@@ -85,28 +134,65 @@ class Runtime:
     """Loads the model once, then answers segments until told to stop."""
 
     def __init__(self, device="cuda"):
+        # "auto" is the honest default for a runner that now sells both. It uses
+        # the card when there is one and the CPU when there is not, and either way
+        # the manifest says which, so a client can see what it is being given.
+        # Naming a device that is not there used to be a SystemExit; it is now a
+        # decision the machine makes and reports.
         self.device = device
+        self.resolved = device
         self.model = None
         self.sample_rate = DEFAULT_SAMPLE_RATE
         self.load_seconds = None
         self.vram_mib = 0
+        self.rss_mib = 0
 
     def load(self):
         t0 = time.monotonic()
         import torch
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-        if self.device == "cuda" and not torch.cuda.is_available():
-            # Loud, not silent. Installing the CPU-only wheel is the most common
-            # way this setup fails and it fails invisibly: everything imports,
-            # everything runs, and the result is slower than whatever machine the
-            # work was moved off.
+        if self.device == "auto":
+            self.resolved = "cuda" if torch.cuda.is_available() else "cpu"
+            svc.log("device chosen", device=self.resolved,
+                    cuda_available=torch.cuda.is_available())
+        else:
+            self.resolved = self.device
+
+        if self.resolved == "cuda" and not torch.cuda.is_available():
+            # STILL LOUD WHEN THE GPU WAS ASKED FOR BY NAME. Installing the
+            # CPU-only wheel is the most common way this setup fails and it fails
+            # invisibly: everything imports, everything runs, and the result is
+            # slower than whatever machine the work was moved off. Asking for
+            # "cuda" and silently getting the CPU would be that failure with a
+            # friendlier face. Ask for "auto" or "cpu" to run on the CPU on
+            # purpose.
             raise SystemExit(
                 "FATAL: torch cannot see the GPU (%s). This is almost always the "
                 "CPU-only wheel from PyPI instead of a CUDA wheel from "
-                "download.pytorch.org. Re-run provision.ps1." % torch.__version__)
+                "download.pytorch.org. Re-run provision.ps1, or set device = auto "
+                "in worker.ini to fall back to the CPU." % torch.__version__)
 
-        if self.device == "cuda":
+        if self.resolved == "cpu":
+            # DO NOT LET TORCH TAKE THE WHOLE MACHINE FROM INSIDE.
+            #
+            # torch defaults its intra-op thread pool to one thread per core, so on
+            # a sixteen thread desktop a single generate() will happily use all
+            # sixteen. The agent's job object cap is a HARD CAP: once the job has
+            # spent its share of the scheduling interval no thread in it runs until
+            # the next one, so sixteen threads under a ten per cent cap do not go
+            # faster than four, they just spend more of their time descheduled and
+            # thrash more cache on the way.
+            #
+            # IDLEGPU_CPU_THREADS is set by the agent from the cap in force. When
+            # it is absent this leaves torch's own default alone, because a
+            # controller run by hand on a spare machine should use it.
+            n = os.getenv("IDLEGPU_CPU_THREADS", "").strip()
+            if n.isdigit() and int(n) > 0:
+                torch.set_num_threads(int(n))
+                svc.log("cpu threads", threads=int(n))
+
+        if self.resolved == "cuda":
             # MATCH THE CPU'S NUMERICS, because the point of moving the work is
             # to make it faster and not to make it different.
             #
@@ -131,14 +217,20 @@ class Runtime:
             svc.log("precision", tf32=allow)
 
         svc.log("loading model", torch=torch.__version__, cuda=torch.version.cuda,
-                device=torch.cuda.get_device_name(0) if self.device == "cuda" else "cpu")
-        self.model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
+                device=torch.cuda.get_device_name(0) if self.resolved == "cuda" else "cpu")
+        self.model = ChatterboxMultilingualTTS.from_pretrained(device=self.resolved)
         self.load_seconds = time.monotonic() - t0
         self.sample_rate = int(getattr(self.model, "sr", DEFAULT_SAMPLE_RATE))
 
-        if self.device == "cuda":
+        if self.resolved == "cuda":
             free, total = torch.cuda.mem_get_info()
             self.vram_mib = int((total - free) / 2 ** 20)
+        else:
+            # System memory, not VRAM, and it is the number the runner's admission
+            # check needs: measured resident size decides whether starting this on
+            # a machine somebody is using pushes it into paging, and paging is felt
+            # in a way CPU contention is not.
+            self.rss_mib = _rss_mib()
         # COLD START. Process spawn to model ready. This decides whether
         # abandon-and-reload is viable at all: if it is sixty seconds and real
         # idle windows are two minutes, a controller that yields correctly never
@@ -259,7 +351,8 @@ def build_handler(rt, service_ref):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--queue", required=True, help="the service's queue directory")
-    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device", default="auto",
+                    help="cuda, cpu, or auto (default): use the card if there is one")
     ap.add_argument("--once", action="store_true", help="drain the queue and exit")
     ap.add_argument("--no-stdin-watch", action="store_true",
                     help="for running by hand, where stdin is a terminal")
@@ -280,8 +373,18 @@ def main():
     # A deliberately conservative starting value, corrected upwards by
     # measurement the first time a segment takes longer. It is not a claim about
     # any particular card.
-    unit = args.segment_seconds if args.fake_model else 8.0
-    m = manifest(rt.sample_rate, rt.device, unit, rt.vram_mib)
+    # A CPU run is far slower per segment than a CUDA one, and unit_seconds is
+    # the floor on how long after a polite request the machine can still be busy.
+    # Starting a CPU run with the GPU's number would understate that floor to
+    # every client until the first segment corrected it upwards.
+    resolved = getattr(rt, "resolved", rt.device)
+    if args.fake_model:
+        unit = args.segment_seconds
+    elif resolved == "cpu":
+        unit = 60.0
+    else:
+        unit = 8.0
+    m = manifest(rt.sample_rate, resolved, unit, rt.vram_mib, getattr(rt, "rss_mib", 0))
     m["unit_seconds_source"] = "unverified default until a segment has been timed"
     ref = [None]
     service = svc.Service(args.queue, m, build_handler(rt, ref),

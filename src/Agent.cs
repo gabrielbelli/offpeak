@@ -52,7 +52,7 @@ namespace IdleGpu
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         static extern IntPtr CreateJobObjectW(IntPtr sec, string name);
-        [DllImport("kernel32.dll")]
+        [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
         [DllImport("kernel32.dll")]
         static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
@@ -81,8 +81,45 @@ namespace IdleGpu
             public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+        {
+            public long TotalUserTime, TotalKernelTime,
+                        ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses;
+        }
+
+        /// The union in JOBOBJECT_CPU_RATE_CONTROL_INFORMATION is one DWORD in
+        /// every mode - CpuRate, or Weight, or MinRate and MaxRate packed as two
+        /// WORDs - so one struct covers all of them and there is no need for
+        /// explicit layout that C# 5 would make ugly.
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_CPU_RATE_CONTROL_INFORMATION { public uint ControlFlags; public uint Value; }
+
         const int JobObjectExtendedLimitInformation = 9;
         const int JobObjectBasicProcessIdList = 3;
+        const int JobObjectBasicAccountingInformation = 1;
+        const int JobObjectCpuRateControlInformation = 15;
+
+        // Vertical, not horizontal. CpuRate is a proportion of the WHOLE MACHINE
+        // expressed in hundredths of a per cent, measured on spring: a 50 per cent
+        // cap on sixteen spinning threads produced 50.2 per cent of the machine,
+        // which is 8.03 of its 16 logical processors. It says HOW MUCH, never
+        // WHICH CORES, which is the distinction this whole feature turns on.
+        //
+        // JOB_OBJECT_LIMIT_AFFINITY is deliberately not used and not defined here.
+        // Pinning to a subset of cores is the horizontal answer, and on a Ryzen
+        // with a single CCD it also fights the scheduler's cache-aware placement.
+        const uint JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1;
+        const uint JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4;
+        const uint JOB_OBJECT_LIMIT_WORKINGSET = 0x00000001;
+        const uint JOB_OBJECT_LIMIT_PRIORITY_CLASS = 0x00000020;
+
+        const uint IDLE_PRIORITY_CLASS = 0x00000040;
+        const uint BELOW_NORMAL_PRIORITY_CLASS = 0x00004000;
+        const uint NORMAL_PRIORITY_CLASS = 0x00000020;
+
+        const int ERROR_PRIVILEGE_NOT_HELD = 1314;
 
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool QueryInformationJobObject(IntPtr job, int infoClass,
@@ -111,6 +148,28 @@ namespace IdleGpu
         /// WriteLine ran against a closed pipe. A listener that raises the job rate
         /// makes it fire on essentially every yield.
         volatile bool _stopping;
+
+        /// The limits currently written into the kernel for this job, so that a
+        /// tick which changes nothing costs nothing. SetInformationJobObject on
+        /// every tick would work; it would also be a syscall per service per
+        /// second on the thread that must never wait for anything.
+        ResourceLimits _applied;
+
+        /// True once JOB_OBJECT_LIMIT_WORKINGSET has been refused for want of a
+        /// privilege, so it is not retried every tick and so the tray can say why
+        /// the memory cap is not in force.
+        ///
+        /// MEASURED, and it is the opposite way round from the documentation's
+        /// warning. The docs attach SE_INC_BASE_PRIORITY_NAME to
+        /// JOB_OBJECT_LIMIT_PRIORITY_CLASS. With that privilege removed from the
+        /// token on spring, setting IDLE_PRIORITY_CLASS through the job still
+        /// SUCCEEDED - lowering a priority never needed it - and it was the
+        /// WORKING SET limit that failed, with 1314, ERROR_PRIVILEGE_NOT_HELD.
+        /// The agent runs as SYSTEM from the boot task and has it; somebody
+        /// running the tray by hand as an ordinary user does not, and gets the
+        /// CPU cap and the priority without the memory cap rather than nothing.
+        public bool WorkingSetDenied;
+        public string LastLimitError = "";
 
         public JobRunner(ServiceDef svc, Config c, Action<string> log)
         {
@@ -195,6 +254,178 @@ namespace IdleGpu
         public int Starts;
         public DateTime StartedAt = DateTime.MinValue;
 
+        /// Total CPU time this job's whole process tree has burned, in 100 ns
+        /// ticks, or 0 when there is no job.
+        ///
+        /// THIS IS WHAT MAKES THE CPU SIGNAL HONEST. A whole-machine CPU reading
+        /// has no owner attached to it, so without this the agent reads its own
+        /// load as somebody else's and yields to itself - the exact defect the GPU
+        /// tier 2 had to be patched around by suppressing its load votes. A job
+        /// object accounts for every process assigned to it, including children
+        /// the controller spawned, so subtracting this from the machine total is
+        /// arithmetic rather than a guess.
+        public long CpuTime100ns
+        {
+            get
+            {
+                if (_job == IntPtr.Zero) return 0;
+                int len = Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+                IntPtr buf = Marshal.AllocHGlobal(len);
+                try
+                {
+                    uint got;
+                    if (!QueryInformationJobObject(_job, JobObjectBasicAccountingInformation,
+                                                   buf, (uint)len, out got)) return 0;
+                    var a = (JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)
+                        Marshal.PtrToStructure(buf, typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+                    return a.TotalUserTime + a.TotalKernelTime;
+                }
+                catch (Exception) { return 0; }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+        }
+
+        public ResourceLimits AppliedLimits { get { return _applied; } }
+
+        /// How many threads the controller should ask its framework for, set by
+        /// the agent from the cap in force just before Start.
+        ///
+        /// WHY THE CHILD NEEDS TELLING AT ALL, given the cap is enforced by the
+        /// kernel. Because the cap is a HARD CAP: once the job has spent its share
+        /// of a scheduling interval, no thread in it runs until the next one. A
+        /// torch process that defaults to one thread per core then has sixteen
+        /// threads taking turns inside a tenth of the machine, which finishes no
+        /// sooner than four would and evicts far more of the owner's cache on the
+        /// way. The cap decides how much; this decides how thinly it is spread.
+        public int CpuThreads;
+
+        /// Push a row of the matrix into the kernel, on a LIVE job.
+        ///
+        /// THE TRAY REQUIREMENT LIVES OR DIES HERE. A limit that could only be set
+        /// when a job started, or that needed a restart to move, would make the
+        /// settings window a lie: the owner would change a number, see the menu
+        /// update, and the machine would carry on exactly as before until the next
+        /// job. Every mechanism used below was checked against that on spring
+        /// before it was chosen:
+        ///
+        ///   CPU rate control   set on a running job, the call returned in under a
+        ///                      millisecond, and the job was measured under 10 per
+        ///                      cent within the first 200 ms sampling window after
+        ///                      dropping the cap from 80 per cent to 5. Raising it
+        ///                      back to 90 was measured over 50 per cent again
+        ///                      within 828 ms. Clearing it entirely with
+        ///                      ControlFlags = 0 returned the job to 97.4 per cent.
+        ///   priority class     set on a running job through the job object, which
+        ///                      covers children the controller has already spawned.
+        ///   working set        set and cleared on a running job.
+        ///
+        /// SO THE CPU PROMISE IS: one sampling tick to notice, plus about 200 ms
+        /// for the cap to bind. Under one and a half seconds from the owner
+        /// touching the keyboard to the job being throttled, and unlike the GPU it
+        /// costs nothing, because the job is squeezed rather than killed and there
+        /// is no model to load again afterwards.
+        ///
+        /// Idempotent. Returns true when it actually wrote something.
+        public bool ApplyLimits(ResourceLimits want)
+        {
+            if (want == null || _job == IntPtr.Zero) return false;
+            if (_applied != null && _applied.SameAs(want)) return false;
+
+            // --- the cap -------------------------------------------------------
+            //
+            // A cap of 100 is not a cap, it is the absence of one, and writing
+            // CpuRate = 10000 would leave the scheduler doing rate accounting for
+            // no reason. ControlFlags = 0 removes it, measured to restore the job
+            // to full speed.
+            var rate = new JOBOBJECT_CPU_RATE_CONTROL_INFORMATION();
+            if (want.CpuPct > 0 && want.CpuPct < 100)
+            {
+                rate.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+                rate.Value = (uint)(want.CpuPct * 100);
+            }
+            SetJobInfo(JobObjectCpuRateControlInformation, rate, "cpu rate");
+
+            // --- priority and the working set ----------------------------------
+            //
+            // One call, because JOBOBJECT_EXTENDED_LIMIT_INFORMATION carries both
+            // and a second call would clobber the first: LimitFlags is the whole
+            // set of limits in force, not a delta, so KILL_ON_JOB_CLOSE has to be
+            // written every time or the job stops killing its tree.
+            var ext = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            ext.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                                                 | JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+            ext.BasicLimitInformation.PriorityClass = PriorityValue(want.Priority);
+            bool wantWs = want.WorkingSetMib > 0 && !WorkingSetDenied;
+            if (wantWs)
+            {
+                ext.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_WORKINGSET;
+                // A minimum is mandatory when a maximum is set, and it must not be
+                // zero. An eighth of the maximum leaves the job enough resident to
+                // make progress while the trimming still bites.
+                ulong maxBytes = (ulong)want.WorkingSetMib * 1048576UL;
+                ulong minBytes = maxBytes / 8UL;
+                if (minBytes < 16UL * 1048576UL) minBytes = 16UL * 1048576UL;
+                if (minBytes >= maxBytes) minBytes = maxBytes / 2UL;
+                ext.BasicLimitInformation.MinimumWorkingSetSize = new UIntPtr(minBytes);
+                ext.BasicLimitInformation.MaximumWorkingSetSize = new UIntPtr(maxBytes);
+            }
+            if (!SetJobInfo(JobObjectExtendedLimitInformation, ext, "priority/working set")
+                && wantWs && _lastSetErr == ERROR_PRIVILEGE_NOT_HELD)
+            {
+                // Degrade, and say so, rather than losing the priority too. An
+                // ordinary user's token has no SeIncreaseBasePriorityPrivilege, so
+                // the memory cap is not available to them; the CPU cap and the
+                // priority are, and they are the larger half.
+                WorkingSetDenied = true;
+                LastLimitError = "the working set cap needs SeIncreaseBasePriorityPrivilege, "
+                               + "which this account does not have; the CPU cap and priority are still in force";
+                _log(_svc.Id + ": " + LastLimitError);
+                var noWs = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                noWs.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                                                      | JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+                noWs.BasicLimitInformation.PriorityClass = PriorityValue(want.Priority);
+                SetJobInfo(JobObjectExtendedLimitInformation, noWs, "priority");
+            }
+
+            _applied = want.Clone();
+            return true;
+        }
+
+        static uint PriorityValue(string p)
+        {
+            string t = Config.NormalisePriority(p);
+            if (t == "normal") return NORMAL_PRIORITY_CLASS;
+            if (t == "belownormal") return BELOW_NORMAL_PRIORITY_CLASS;
+            return IDLE_PRIORITY_CLASS;
+        }
+
+        int _lastSetErr;
+
+        /// The Win32 error is captured INSIDE this method, before the FreeHGlobal
+        /// in the finally block. GetLastError is per thread and any intervening
+        /// call can overwrite it, so reading it at the call site is a race that
+        /// shows up as the working set limit failing for an error code that was
+        /// really the allocator's.
+        bool SetJobInfo<T>(int infoClass, T value, string what)
+        {
+            int len = Marshal.SizeOf(typeof(T));
+            IntPtr p = Marshal.AllocHGlobal(len);
+            try
+            {
+                Marshal.StructureToPtr(value, p, false);
+                if (SetInformationJobObject(_job, infoClass, p, (uint)len)) { _lastSetErr = 0; return true; }
+                _lastSetErr = Marshal.GetLastWin32Error();
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _lastSetErr = 0;
+                LastLimitError = what + ": " + ex.Message;
+                return false;
+            }
+            finally { Marshal.FreeHGlobal(p); }
+        }
+
         public bool Start()
         {
             if (Running || _stopping) return Running;
@@ -207,6 +438,13 @@ namespace IdleGpu
             {
                 ReapHandle();
                 _job = CreateJobObjectW(IntPtr.Zero, null);
+                // A new kernel object holds none of the old one's limits, so the
+                // memo of what has been written has to go with it. Without this a
+                // restarted controller would inherit the PREVIOUS job's cap in the
+                // agent's bookkeeping and never have it written, which is the
+                // quiet kind of wrong: the menu says 10 per cent and the machine
+                // runs flat out.
+                _applied = null;
                 var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 int len = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
@@ -252,6 +490,9 @@ namespace IdleGpu
                 // quietly false. Set on the child, never on the machine.
                 foreach (KeyValuePair<string, string> kv in Install.ContainedEnvironment(_svc, _c))
                     psi.EnvironmentVariables[kv.Key] = kv.Value;
+                if (CpuThreads > 0)
+                    psi.EnvironmentVariables["IDLEGPU_CPU_THREADS"] =
+                        CpuThreads.ToString(CultureInfo.InvariantCulture);
 
                 PrepareChildLog();
                 _proc = Process.Start(psi);
@@ -399,6 +640,7 @@ namespace IdleGpu
         readonly Config _c;
         readonly GpuMonitor _gpu;
         readonly GpuProcessMemory _vram = new GpuProcessMemory();
+        readonly SystemCpu _cpu = new SystemCpu();
         readonly GpuEngineUtil _engines = new GpuEngineUtil();
         readonly Policy _policy;
         readonly object _lock = new object();
@@ -409,6 +651,11 @@ namespace IdleGpu
         readonly Dictionary<string, JobStore> _queues =
             new Dictionary<string, JobStore>(StringComparer.OrdinalIgnoreCase);
 
+        /// Services already reported as held back for want of memory, so the log
+        /// says it once rather than twice a second for as long as the machine is
+        /// full.
+        readonly HashSet<string> _memoryHeld = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         readonly ConcurrentQueue<Command> _commands = new ConcurrentQueue<Command>();
         int _commandDepth;
 
@@ -418,6 +665,8 @@ namespace IdleGpu
         List<ProcessGpuUse> _lastVram = new List<ProcessGpuUse>();
         Dictionary<string, double> _lastEngines = new Dictionary<string, double>();
         DateTime _countersAt = DateTime.MinValue;
+        long _ownCpu100ns;
+        DateTime _ownCpuAt = DateTime.MinValue;
         PresenceReport _presence;
         DateTime _presenceAt = DateTime.MinValue;
 
@@ -642,6 +891,8 @@ namespace IdleGpu
                     s.GpuHealthy = _gpu.Healthy;
                     s.Session = Win.Read();
                     s.Launchers = Launchers.Read(_c.GameProcessNames, _c.AntiCheatServices);
+                    s.Cpu = SampleCpu(s.At);
+                    s.Memory = SystemMemory.Read();
 
                     // WHAT SESSION 0 CANNOT SEE, SUPPLIED BY SOMEBODY WHO CAN.
                     // Only ever an overlay, and only when this agent is outside
@@ -704,13 +955,34 @@ namespace IdleGpu
                     Verdict v = _policy.Evaluate(s);
                     lock (_lock) { _snap = s; }
 
+                    // Before the stop decision, not after. A job that is about to
+                    // be stopped anyway loses nothing by being throttled first, and
+                    // a job that is NOT being stopped - the ordinary case, where
+                    // the owner has come back to a machine that is only allowed
+                    // ten per cent of it now - gets its new cap in this tick rather
+                    // than the next one.
+                    //
+                    // Always-on is the exception, and it is the same exception the
+                    // GPU makes: somebody who has explicitly said "use my machine
+                    // anyway" has asked for exactly that, and quietly capping them
+                    // to ten per cent would be an override that overrides nothing.
+                    ApplyLimits(Mode == Mode.AlwaysOn ? Config.Unlimited : v.Limits);
+
                     bool can = _policy.CanRun(Mode);
-                    if (!can)
+                    // PER SERVICE, not one answer for the whole runner. A GPU
+                    // service is stopped by the GPU detector; a CPU service is
+                    // stopped when its row of the matrix says nothing, which is
+                    // Busy. Asking one question for both meant a CPU job died
+                    // every time a game started, for a card it was not using.
+                    bool gpuCan = _policy.CanRunGpu(Mode);
+                    bool cpuCan = _policy.CanRunCpu(Mode);
                     {
                         string why = Mode == Mode.Off ? "switched off" : v.ReasonText;
+                        if (Mode != Mode.Off && string.IsNullOrEmpty(why)) why = v.StateReason;
                         foreach (JobRunner j in _jobs.Values)
                         {
                             if (!j.Running || j.Stopping) continue;
+                            if (j.Service.WantsGpu ? gpuCan : cpuCan) continue;
                             JobRunner target = j;
                             // Off the sampling thread, deliberately. Stop() waits up
                             // to the grace period for the child to go; called inline
@@ -749,6 +1021,95 @@ namespace IdleGpu
                 catch (Exception ex) { Log("sample failed: " + ex.Message); }
                 Sleep(_c.FastPollMs);
             }
+        }
+
+        /// Machine CPU, our CPU, and the difference.
+        ///
+        /// OWN CPU IS SUBTRACTED RATHER THAN THE SIGNAL BEING SUPPRESSED, which is
+        /// the one place the CPU can do better than the GPU. The GPU's tier 2 has
+        /// to go silent while our own job runs, because nvidia-smi reports a whole
+        /// card with no owner attached and the agent otherwise yields to the load
+        /// it created. Job object accounting names its own processes exactly, so
+        /// here the foreign share is arithmetic and the signal keeps working while
+        /// a job is running - which is when it matters most, because that is when
+        /// the owner walks up to a machine that is already busy.
+        CpuSample SampleCpu(DateTime at)
+        {
+            var c = new CpuSample();
+            c.At = at;
+            double machine = _cpu.ReadPct();
+
+            long own = 0;
+            foreach (JobRunner j in _jobs.Values) own += j.CpuTime100ns;
+            double ownPct = 0;
+            if (_ownCpuAt != DateTime.MinValue)
+            {
+                double wall = (at - _ownCpuAt).TotalSeconds;
+                // A job that ended took its accounting with it when the handle
+                // closed, so the delta goes negative. That is not a measurement,
+                // it is bookkeeping, and it must not turn into a negative foreign
+                // load that reads as an idle machine.
+                if (wall > 0 && own >= _ownCpu100ns)
+                    ownPct = 100.0 * ((own - _ownCpu100ns) / 10000000.0)
+                             / (wall * Environment.ProcessorCount);
+            }
+            _ownCpu100ns = own; _ownCpuAt = at;
+
+            if (machine < 0) return c;     // first sample: a rate needs two reads
+            c.Valid = true;
+            c.MachinePct = machine;
+            c.OwnPct = ownPct > machine ? machine : ownPct;
+            c.ForeignPct = machine - c.OwnPct;
+            if (c.ForeignPct < 0) c.ForeignPct = 0;
+            return c;
+        }
+
+        /// Write the row of the matrix into every live job.
+        ///
+        /// ON THE FAST LOOP DELIBERATELY. This IS the yield path for the CPU: it
+        /// is what turns "the owner just touched the keyboard" into a cap the
+        /// scheduler enforces, and measured on spring the cap binds within 200 ms
+        /// of the call. Putting it on the slow loop would double the promise for
+        /// no reason. It costs nothing when nothing has changed, because
+        /// JobRunner.ApplyLimits compares against what it last wrote and returns
+        /// without a syscall.
+        void ApplyLimits(ResourceLimits want)
+        {
+            if (want == null) return;
+            foreach (JobRunner j in _jobs.Values)
+            {
+                if (!j.Running) continue;
+                try
+                {
+                    if (j.ApplyLimits(want))
+                        Append(j.Service.Id + ": limits now " + want.Describe());
+                }
+                catch (Exception ex) { Log("could not apply limits: " + ex.Message); }
+            }
+        }
+
+        /// Is there enough free memory to start this service right now.
+        ///
+        /// WHY AN ADMISSION CHECK AND NOT ONLY A CAP. The two answer different
+        /// questions and this project needs both. A working set cap contains a job
+        /// that has already started; it cannot undo the moment where a 6.5 GiB
+        /// model loads onto a machine that had 2 GiB spare and the owner's browser
+        /// goes to disk. Paging is felt in a way CPU contention is not - a
+        /// throttled job makes things slower, a machine that is swapping makes
+        /// things stop - so the cheapest fix is not to start.
+        ///
+        /// The reservation is the row's MinFreeMib plus whatever the service
+        /// itself declared it needs, so a service that says nothing is admitted on
+        /// the headroom rule alone rather than being blocked for ever.
+        public bool MemoryAllows(ServiceDef svc, ResourceLimits limits, out string why)
+        {
+            why = "";
+            if (limits == null || limits.MinFreeMib <= 0) return true;
+            MemorySample m;
+            lock (_lock) { m = _snap == null ? null : _snap.Memory; }
+            bool known = m != null && m.Valid;
+            return Policy.MemoryAllows(known ? m.AvailableMib : 0, known,
+                limits.MinFreeMib, svc == null ? 0 : svc.NeedsMemoryMib, out why);
         }
 
         void DrainCommands()
@@ -809,8 +1170,11 @@ namespace IdleGpu
                                 " job(s) whose controller was killed before it could put them back");
                     }
 
-                    if (_policy.CanRun(Mode) && !JobRunning)
+                    if (!JobRunning)
                     {
+                        ResourceLimits limits = _policy.Limits;
+                        bool gpuOk = _policy.CanRunGpu(Mode);
+                        bool cpuOk = _policy.CanRunCpu(Mode);
                         ServiceDef best = null;
                         foreach (ServiceDef s in _services)
                         {
@@ -818,14 +1182,46 @@ namespace IdleGpu
                             if (j.Stopping) { best = null; break; }
                             JobStore q = _queues[s.Id];
                             if (q.QueuedCount() <= 0) continue;
+                            // A CPU service does not wait for a card it never
+                            // touches. Before this the one gate was the GPU's
+                            // Available, so a speech job running on the CPU sat
+                            // out a ninety second cooldown caused by a game on a
+                            // GPU it had no interest in.
+                            if (!(s.WantsGpu ? gpuOk : cpuOk)) continue;
+                            string why;
+                            if (!MemoryAllows(s, limits, out why))
+                            {
+                                if (_memoryHeld.Add(s.Id))
+                                    Log(s.Id + ": not starting yet, " + why);
+                                continue;
+                            }
+                            _memoryHeld.Remove(s.Id);
                             if (best == null || s.Priority > best.Priority) best = s;
                         }
-                        if (best != null) _jobs[best.Id].Start();
+                        if (best != null)
+                        {
+                            ResourceLimits use = Mode == Mode.AlwaysOn ? Config.Unlimited : limits;
+                            JobRunner jr = _jobs[best.Id];
+                            jr.CpuThreads = ThreadsFor(use);
+                            if (jr.Start()) jr.ApplyLimits(use);
+                        }
                     }
                 }
                 catch (Exception ex) { Log("scheduler: " + ex.Message); }
                 Sleep(_c.SchedulerPollMs);
             }
+        }
+
+        /// How many threads a cap is worth, on this machine.
+        ///
+        /// Detected, never assumed: Environment.ProcessorCount, because a stranger's
+        /// machine is not sixteen threads. Always at least one, because zero
+        /// threads is not a smaller job, it is no job.
+        static int ThreadsFor(ResourceLimits l)
+        {
+            if (l == null || l.CpuPct <= 0 || l.CpuPct >= 100) return 0;   // 0 = leave the default alone
+            int n = (int)Math.Round(Environment.ProcessorCount * l.CpuPct / 100.0);
+            return n < 1 ? 1 : n;
         }
 
         void Sleep(int ms)
@@ -860,6 +1256,35 @@ namespace IdleGpu
             sb.Append(Json.P("yields", Json.Num(Yields))).Append(",");
             sb.Append(Json.P("last_yield_ms", Json.Num(LastYieldMs))).Append(",");
             sb.Append(Json.P("last_yield_was_kill", LastYieldWasKill ? "true" : "false")).Append(",");
+            // The matrix row in force, and the row itself. Published rather than
+            // only shown in the tray, so a headless agent, `type state.json` and
+            // GET /v1/status all say the same thing about what this machine is
+            // currently willing to give up.
+            sb.Append(Json.P("machine_state", Json.Esc(Config.StateKey(v.MachineState)))).Append(",");
+            sb.Append(Json.P("machine_state_reason", Json.Esc(v.StateReason))).Append(",");
+            sb.Append("\"limits\":").Append(Json.Obj(
+                Json.P("gpu", v.Limits.Gpu ? "true" : "false"),
+                Json.P("cpu_pct", Json.Num(v.Limits.CpuPct)),
+                Json.P("priority", Json.Esc(Config.NormalisePriority(v.Limits.Priority))),
+                Json.P("working_set_mib", Json.Num(v.Limits.WorkingSetMib)),
+                Json.P("min_free_mib", Json.Num(v.Limits.MinFreeMib)))).Append(",");
+            sb.Append("\"cpu\":");
+            if (s.Cpu != null && s.Cpu.Valid)
+                sb.Append(Json.Obj(
+                    Json.P("machine_pct", Json.Num(Math.Round(s.Cpu.MachinePct, 1))),
+                    Json.P("own_pct", Json.Num(Math.Round(s.Cpu.OwnPct, 1))),
+                    Json.P("foreign_pct", Json.Num(Math.Round(s.Cpu.ForeignPct, 1))),
+                    Json.P("logical_processors", Json.Num(Environment.ProcessorCount))));
+            else sb.Append("null");
+            sb.Append(",");
+            sb.Append("\"memory\":");
+            if (s.Memory != null && s.Memory.Valid)
+                sb.Append(Json.Obj(
+                    Json.P("total_mib", Json.Num(s.Memory.TotalMib)),
+                    Json.P("available_mib", Json.Num(s.Memory.AvailableMib)),
+                    Json.P("load_pct", Json.Num(s.Memory.LoadPct))));
+            else sb.Append("null");
+            sb.Append(",");
 
             sb.Append("\"services\":[");
             for (int i = 0; i < _services.Count; i++)
@@ -1103,6 +1528,75 @@ namespace IdleGpu
                 File.WriteAllLines(_c.ConfigPath, lines.ToArray(), new UTF8Encoding(false));
             }
             catch (Exception) { }
+        }
+
+        /// Write the whole limits matrix back to worker.ini.
+        ///
+        /// WHY REWRITE RATHER THAN APPEND. The settings window can change any of
+        /// twenty five values, and appending twenty five lines every time somebody
+        /// pressed Apply would grow the file without bound and leave the reader
+        /// looking at whichever copy came last. So every limits.* line is dropped
+        /// and one current block is written at the end, and every OTHER line in
+        /// the file - comments, service sections, the listener settings somebody
+        /// hand-edited - is preserved exactly as it was.
+        ///
+        /// The change is already live before this is called; this is only about
+        /// surviving a restart. A setting that silently resets at the next login
+        /// is a setting the owner stops trusting, and these are the settings they
+        /// reach for precisely when they do not yet trust something.
+        public void SaveLimits()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_c.ConfigPath)) return;
+                var lines = new List<string>();
+                if (File.Exists(_c.ConfigPath))
+                    foreach (string raw in File.ReadAllLines(_c.ConfigPath))
+                    {
+                        string t = raw.Trim().ToLowerInvariant().Replace(" ", "");
+                        if (t.StartsWith("limits.") && t.Contains("=")) continue;
+                        if (t == "[limits]") continue;
+                        lines.Add(raw);
+                    }
+                while (lines.Count > 0 && lines[lines.Count - 1].Trim().Length == 0)
+                    lines.RemoveAt(lines.Count - 1);
+                lines.Add("");
+                lines.Add("[limits]");
+                lines.Add("# What this machine will give up in each state. Written by the");
+                lines.Add("# settings window; safe to edit by hand.");
+                foreach (MachineState st in Config.AllStates())
+                {
+                    ResourceLimits r = _c.LimitsFor(st);
+                    string k = "limits." + Config.StateKey(st) + ".";
+                    lines.Add("");
+                    lines.Add("# " + Config.StateLabel(st) + ": " + r.Describe());
+                    lines.Add(k + "gpu = " + (r.Gpu ? "yes" : "no"));
+                    lines.Add(k + "cpupct = " + r.CpuPct.ToString(CultureInfo.InvariantCulture));
+                    lines.Add(k + "priority = " + Config.NormalisePriority(r.Priority));
+                    lines.Add(k + "workingsetmib = " + r.WorkingSetMib.ToString(CultureInfo.InvariantCulture));
+                    lines.Add(k + "minfreemib = " + r.MinFreeMib.ToString(CultureInfo.InvariantCulture));
+                }
+                File.WriteAllLines(_c.ConfigPath, lines.ToArray(), new UTF8Encoding(false));
+            }
+            catch (Exception ex) { Log("could not save limits: " + ex.Message); }
+        }
+
+        /// Replace one row of the matrix and make it bite now.
+        ///
+        /// The tray and the settings window call this. The write is a whole-object
+        /// swap into the dictionary rather than a field-by-field edit, so the
+        /// sampling thread can only ever read a complete row: C# 5 has no records
+        /// and no reference assignment guarantees worth relying on beyond that a
+        /// reference store is atomic, which is exactly what this needs.
+        public void SetLimits(MachineState st, ResourceLimits r)
+        {
+            if (r == null) return;
+            _c.Limits[st] = r.Clone();
+            Append("limits for " + Config.StateLabel(st).ToLowerInvariant() + " set to " + r.Describe());
+            // Bind immediately rather than at the next job. The whole point of
+            // making this editable from the tray is that the owner changes it
+            // while something is running and feels the difference.
+            if (_policy.MachineState == st) ApplyLimits(Mode == Mode.AlwaysOn ? Config.Unlimited : r);
         }
 
         /// state.json, next to the agent, for anything on the box that would rather

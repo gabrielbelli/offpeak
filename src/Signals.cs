@@ -320,6 +320,98 @@ namespace IdleGpu
         }
     }
 
+    // ------------------------------------------------------------ CPU and RAM ---
+
+    /// The whole machine's CPU, from GetSystemTimes.
+    ///
+    /// WHY NOT PDH, given the GPU counters already use it. Two reasons, and both
+    /// matter for something meant to be published rather than run on one desk.
+    ///
+    ///   1. PDH COUNTER PATHS ARE LOCALISED. "\Processor Information(_Total)\%
+    ///      Processor Time" is an English string; on a German or Portuguese
+    ///      Windows the counter exists under a translated name and the English
+    ///      path returns PDH_CSTATUS_NO_OBJECT. The GPU counters get away with it
+    ///      because "GPU Engine" happens not to be translated on the machines this
+    ///      was measured on, which is luck rather than a design.
+    ///   2. COST. One PDH counter sample was measured at 98 ms on spring, which is
+    ///      why it lives on the slow loop. GetSystemTimes is a single syscall and
+    ///      belongs on the fast loop, where the yield decision is.
+    ///
+    /// Stateful on purpose: CPU per cent is a rate, so it needs two reads. The
+    /// first Read after construction returns Valid = false rather than a number
+    /// made up out of one sample.
+    public class SystemCpu
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct FILETIME { public uint Low, High; }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetSystemTimes(out FILETIME idle, out FILETIME kernel, out FILETIME user);
+
+        static ulong V(FILETIME f) { return ((ulong)f.High << 32) | f.Low; }
+
+        ulong _idle, _kernel, _user;
+        bool _primed;
+
+        /// Machine-wide busy per cent since the previous call, 0..100.
+        /// Returns -1 until there are two samples to subtract.
+        public double ReadPct()
+        {
+            FILETIME i, k, u;
+            if (!GetSystemTimes(out i, out k, out u)) return -1;
+            ulong ni = V(i), nk = V(k), nu = V(u);
+            if (!_primed) { _idle = ni; _kernel = nk; _user = nu; _primed = true; return -1; }
+            // GetSystemTimes reports kernel time INCLUSIVE of idle time, which is
+            // the trap in this API: subtracting idle from the total is wrong unless
+            // idle has already been removed from kernel.
+            ulong dIdle = ni - _idle, dKernel = nk - _kernel, dUser = nu - _user;
+            _idle = ni; _kernel = nk; _user = nu;
+            ulong total = dKernel + dUser;
+            if (total == 0) return -1;
+            double busy = 100.0 * (double)(total - dIdle) / (double)total;
+            return busy < 0 ? 0 : (busy > 100 ? 100 : busy);
+        }
+    }
+
+    /// Free memory, for the admission check and the working set cap.
+    ///
+    /// Measured cost on spring: 0.001 ms per call over a thousand calls, so this
+    /// can sit on the fast loop without being noticed.
+    public static class SystemMemory
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct MEMORYSTATUSEX
+        {
+            public uint dwLength; public uint dwMemoryLoad;
+            public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile,
+                         ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX m);
+
+        /// ullAvailPhys, not commit headroom.
+        ///
+        /// The question the admission check asks is "would starting a 6.5 GiB job
+        /// hurt right now", and the honest counter for that is physical memory the
+        /// system can hand out without taking it off somebody: free plus standby.
+        /// ullAvailPageFile is the wrong number - a machine with a large page file
+        /// has gigabytes of it while already paging hard, which is exactly the
+        /// state this check exists to refuse to add to.
+        public static MemorySample Read()
+        {
+            var m = new MemorySample();
+            m.At = DateTime.UtcNow;
+            var x = new MEMORYSTATUSEX();
+            x.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+            if (!GlobalMemoryStatusEx(ref x)) return m;
+            m.TotalMib = (long)(x.ullTotalPhys / 1048576UL);
+            m.AvailableMib = (long)(x.ullAvailPhys / 1048576UL);
+            m.LoadPct = (int)x.dwMemoryLoad;
+            m.Valid = true;
+            return m;
+        }
+    }
+
     // ------------------------------------------------------- Windows session ---
 
 

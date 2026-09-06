@@ -8,6 +8,9 @@
 //   --calibrate  append every signal to a CSV for N minutes and exit
 //   --serve      the agent and its listener, headless, until Ctrl-C
 //   --presence   report this session's signals to an agent running at boot
+//   --limits     prove the CPU cap, the priority and the memory cap on THIS
+//                machine, using the same JobRunner the tray uses, and exit
+//   --spin N S   internal, the load --limits measures
 //   --tray       the actual product (default)
 //
 // --watch and --calibrate exit on their own. That is not decoration: it is what
@@ -118,8 +121,121 @@ namespace IdleGpu
             if (mode == "--serve") return Serve(cfg, rest.Count > 0 ? int.Parse(rest[0], CultureInfo.InvariantCulture) : 0);
             // The logon half of a boot install. See Cli.Presence.
             if (mode == "--presence") return Cli.Presence(cfg, rest.Count > 0 ? int.Parse(rest[0], CultureInfo.InvariantCulture) : 0);
+            if (mode == "--limits") return LimitsSelfTest(cfg);
+            if (mode == "--spin") return Spin(rest.Count > 0 ? int.Parse(rest[0], CultureInfo.InvariantCulture) : 20);
             if (mode == "--help" || mode == "-h") { Cli.Usage(); return 0; }
             return Tray(cfg);
+        }
+
+        /// Prove the vertical limits on THIS machine, in about fifty seconds.
+        ///
+        /// WHY THIS SHIPS RATHER THAN LIVING IN probe/. Everything the CPU ladder
+        /// promises is a claim about a kernel API on a machine nobody here has
+        /// seen. CpuRate is documented as a share of the whole machine; it was
+        /// measured as one on a Ryzen 7 5700X3D and nowhere else. The working set
+        /// cap needs a privilege whose absence is silent. A stranger installing
+        /// this deserves to be able to check both in one command rather than
+        /// believing a number in a README that was measured on somebody else's
+        /// desk.
+        ///
+        /// It uses the SAME JobRunner.ApplyLimits the tray uses, against a real
+        /// child process in a real job object, so it cannot pass while the shipped
+        /// path is broken. It self-terminates, like --watch and --calibrate, so it
+        /// is safe to run over SSH against somebody's gaming PC.
+        static int LimitsSelfTest(Config cfg)
+        {
+            int cores = Environment.ProcessorCount;
+            Console.WriteLine("machine: {0} logical processors", cores);
+            MemorySample mem = SystemMemory.Read();
+            if (mem.Valid)
+                Console.WriteLine("memory : {0:N0} MiB total, {1:N0} MiB available, {2}% load",
+                    mem.TotalMib, mem.AvailableMib, mem.LoadPct);
+            Console.WriteLine();
+
+            var svc = new ServiceDef();
+            svc.Id = "limits-selftest";
+            svc.Command = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+            svc.Arguments = "--spin 60";
+            svc.WorkingDir = Path.GetTempPath();
+            svc.YieldGraceSeconds = 1;
+            var runner = new JobRunner(svc, cfg, delegate(string m) { Console.WriteLine("  " + m); });
+            if (!runner.Start()) { Console.WriteLine("could not start the load"); return 1; }
+            try
+            {
+                System.Threading.Thread.Sleep(1500);
+                Console.WriteLine("{0,-38} {1}", "limits applied", "measured share of the whole machine");
+                foreach (ResourceLimits l in SelfTestRungs())
+                {
+                    runner.ApplyLimits(l);
+                    System.Threading.Thread.Sleep(700);      // let the cap settle
+                    double pct = MeasureJobPct(runner, 2500, cores);
+                    Console.WriteLine("{0,-38} {1,8:N1}%  = {2,5:N2} cores",
+                        l.Describe(), pct, pct * cores / 100.0);
+                }
+                Console.WriteLine();
+                Console.WriteLine(runner.WorkingSetDenied
+                    ? "working set cap: NOT AVAILABLE to this account. " + runner.LastLimitError
+                    : "working set cap: accepted by the kernel");
+                Console.WriteLine();
+                Console.WriteLine("Read the middle column against the first. A cap that is a share of ONE");
+                Console.WriteLine("core would read about 1/{0} of these numbers; a share of the WHOLE", cores);
+                Console.WriteLine("machine reads them as printed. Vertical, not horizontal: nothing above");
+                Console.WriteLine("pins anything to a particular core.");
+            }
+            finally { runner.Stop("self test finished"); runner.Dispose(); }
+            return 0;
+        }
+
+        static List<ResourceLimits> SelfTestRungs()
+        {
+            var outp = new List<ResourceLimits>();
+            int[] caps = new int[] { 100, 50, 25, 10, 5, 100 };
+            string[] prios = new string[] { "normal", "idle", "idle", "idle", "idle", "normal" };
+            for (int i = 0; i < caps.Length; i++)
+            {
+                var l = new ResourceLimits();
+                l.Gpu = true; l.CpuPct = caps[i]; l.Priority = prios[i];
+                // The last row is the first row again, on purpose: it proves the
+                // cap comes back OFF on a live job. Giving CPU back as the owner
+                // stops needing it is half the promise, and a limiter that can only
+                // tighten is a limiter that ratchets a machine down to nothing.
+                l.WorkingSetMib = i == 3 ? 512 : 0;
+                outp.Add(l);
+            }
+            return outp;
+        }
+
+        static double MeasureJobPct(JobRunner r, int ms, int cores)
+        {
+            long a = r.CpuTime100ns;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            System.Threading.Thread.Sleep(ms);
+            sw.Stop();
+            long b = r.CpuTime100ns;
+            if (b < a || sw.Elapsed.TotalSeconds <= 0) return 0;
+            return 100.0 * ((b - a) / 10000000.0) / (sw.Elapsed.TotalSeconds * cores);
+        }
+
+        /// The load --limits measures. Deliberately one thread per logical
+        /// processor, because a cap that is only ever tested against one thread
+        /// cannot tell "half the machine" from "half a core".
+        static int Spin(int seconds)
+        {
+            DateTime until = DateTime.UtcNow.AddSeconds(seconds);
+            var threads = new List<System.Threading.Thread>();
+            for (int i = 0; i < Environment.ProcessorCount; i++)
+            {
+                var t = new System.Threading.Thread(delegate()
+                {
+                    double x = 1.000001;
+                    while (DateTime.UtcNow < until)
+                        for (int k = 0; k < 200000; k++) x = x * 1.0000001 + 0.0000001;
+                    GC.KeepAlive(x);
+                });
+                t.IsBackground = true; t.Start(); threads.Add(t);
+            }
+            foreach (System.Threading.Thread t in threads) t.Join();
+            return 0;
         }
 
         /// Start the listener beside an agent, or explain why it did not start.

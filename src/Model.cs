@@ -17,10 +17,118 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace IdleGpu
 {
     public enum Mode { Auto, AlwaysOn, Off }
+
+    /// How present the owner is, which is the row of the limits matrix.
+    ///
+    /// WHY A LADDER AND NOT A BOOLEAN. "Is the machine free" has one answer and
+    /// this machine has five, because a game takes the GPU while leaving twelve
+    /// threads idle and a compile takes every thread while the GPU sits at five
+    /// per cent. Selling the two independently is the whole point, and that needs
+    /// a state that both resources can be priced against.
+    ///
+    /// EVERY ROW MUST BE DECIDABLE FROM A SIGNAL THAT EXISTS, or it is a row that
+    /// lies. What each one is read from:
+    ///
+    ///   NobodyHome  Session.HasConsoleUser is false. WTSGetActiveConsoleSessionId
+    ///               finds a session with no user name: the sign-in screen, or a
+    ///               machine that has booted and nobody has logged into yet. This
+    ///               is most of a gaming PC's uptime and the safest state there is.
+    ///   Locked      Session.Locked. Somebody is signed in and demonstrably not at
+    ///               the keyboard. Read from the console session directly when the
+    ///               agent is in it, and from the logon helper's report when it is
+    ///               not, which is the case for the boot task.
+    ///   Idle        Signed in, unlocked, and InputIdleSeconds is at or over
+    ///               IdleAfterSeconds. GetLastInputInfo, which only answers for
+    ///               the calling session, so from session 0 this needs the helper
+    ///               and falls back to LightUse when the helper is not reporting.
+    ///   LightUse    Signed in, unlocked, input recently. Somebody is reading,
+    ///               typing or browsing. This is the state the CPU ladder has to
+    ///               be careful in, and the only one it has to be careful in.
+    ///   Busy        A tier 1 veto fired: Steam has a running app, the anti-cheat
+    ///               service is up, a named game process exists, a foreign process
+    ///               holds VRAM, or the foreground window is full screen. Also
+    ///               reached when foreign CPU load alone is over the trip point,
+    ///               which is what catches a compile.
+    ///
+    /// Ordered from most free to least. Higher ordinal means yield harder, which
+    /// makes "the more restrictive of two states" a Math.Max.
+    public enum MachineState { NobodyHome = 0, Locked = 1, Idle = 2, LightUse = 3, Busy = 4 }
+
+    /// What this agent may take in one machine state. One row of the matrix.
+    ///
+    /// THE MECHANISM BEHIND EVERY FIELD WAS MEASURED, not assumed, on spring
+    /// (Ryzen 7 5700X3D, 16 logical processors, 31.9 GiB, Windows 11 26200) with
+    /// probe/p8_cpu.cs, probe/p9_felt.cs and probe/p10_felt_hard.cs. The numbers
+    /// are in docs/CPU-LIMITS.md. In short:
+    ///
+    ///   CpuPct        JOB_OBJECT_CPU_RATE_CONTROL_INFORMATION with HARD_CAP, as
+    ///                 a proportion of the WHOLE MACHINE and not of one core.
+    ///                 Measured: a 50 per cent cap on sixteen spinning threads
+    ///                 produced 50.2 per cent of the machine, which is 8.03 cores.
+    ///                 This is vertical: it says how much, never which cores.
+    ///                 0 means do not run at all, because CpuRate 0 is rejected by
+    ///                 SetInformationJobObject with INVALID_ARGS, so zero has to
+    ///                 mean stop rather than cap.
+    ///   Priority      IDLE_PRIORITY_CLASS, the "niceness" half. Necessary and NOT
+    ///                 SUFFICIENT: measured against a memory-streaming load and an
+    ///                 eight-thread victim, idle priority alone still cost the
+    ///                 victim 40 per cent of its throughput and moved its median
+    ///                 unit from 4.32 ms to 10.38 ms, because cache eviction has
+    ///                 already happened by the time the scheduler preempts.
+    ///   WorkingSetMib JOB_OBJECT_LIMIT_WORKINGSET maximum. Trims the JOB, so the
+    ///                 job pages instead of the owner's browser. Measured: a child
+    ///                 that committed 512 MiB held a 191 MiB working set under a
+    ///                 192 MiB limit and exited 0. Deliberately NOT a commit cap:
+    ///                 JOB_OBJECT_LIMIT_JOB_MEMORY killed the same child with
+    ///                 0xC0000005, and a limiter that kills the job is a different
+    ///                 product from one that squeezes it.
+    ///   MinFreeMib    Admission. Available physical memory below which a job is
+    ///                 not STARTED. A job not started costs a wait; a job started
+    ///                 on a machine with no headroom costs the owner their session,
+    ///                 and paging is felt in a way CPU contention is not.
+    public class ResourceLimits
+    {
+        public bool Gpu = true;
+        public int CpuPct = 100;
+        public string Priority = "normal";     // normal | belownormal | idle
+        public int WorkingSetMib;              // 0 = do not limit the working set
+        public int MinFreeMib;                 // 0 = start regardless of free memory
+
+        public ResourceLimits Clone()
+        {
+            var r = new ResourceLimits();
+            r.Gpu = Gpu; r.CpuPct = CpuPct; r.Priority = Priority;
+            r.WorkingSetMib = WorkingSetMib; r.MinFreeMib = MinFreeMib;
+            return r;
+        }
+
+        public bool SameAs(ResourceLimits o)
+        {
+            return o != null && o.Gpu == Gpu && o.CpuPct == CpuPct
+                && string.Equals(o.Priority, Priority, StringComparison.OrdinalIgnoreCase)
+                && o.WorkingSetMib == WorkingSetMib && o.MinFreeMib == MinFreeMib;
+        }
+
+        /// One line a person can read in a menu, in the words the menu uses.
+        public string Describe()
+        {
+            if (CpuPct <= 0 && !Gpu) return "nothing";
+            var parts = new List<string>();
+            parts.Add(Gpu ? "GPU yes" : "GPU no");
+            parts.Add(CpuPct <= 0 ? "CPU no"
+                : "CPU " + CpuPct.ToString(CultureInfo.InvariantCulture) + "%");
+            if (!string.Equals(Priority, "normal", StringComparison.OrdinalIgnoreCase))
+                parts.Add(Priority.ToLowerInvariant() == "idle" ? "idle priority" : "low priority");
+            if (WorkingSetMib > 0)
+                parts.Add("RAM " + WorkingSetMib.ToString(CultureInfo.InvariantCulture) + " MiB");
+            return string.Join(", ", parts.ToArray());
+        }
+    }
 
     public enum WorkerState
     {
@@ -42,6 +150,53 @@ namespace IdleGpu
         public string PState;       // P0 fastest .. P12 idle
         public double PowerWatts;
         public int MemUsedMiB;
+        public bool Valid;
+    }
+
+    /// The whole machine's CPU, and the part of it that is ours.
+    ///
+    /// THE DEFECT THIS SHAPE PREVENTS, and it is the same one the GPU tier 2 had.
+    /// Every whole-machine load reading has no owner attached to it, so the moment
+    /// our own controller starts, the agent reads the load it created as somebody
+    /// else at the machine and yields to itself. The GPU could only paper over
+    /// that by SUPPRESSING its load votes while a job ran, which throws away a
+    /// real signal to avoid a false one.
+    ///
+    /// The CPU does not have to make that trade. A job object accounts for its own
+    /// processes exactly, so OwnPct is a measurement rather than a guess and
+    /// ForeignPct is arithmetic. The agent yields to other people's load while a
+    /// job is running, which the GPU still cannot do.
+    ///
+    /// Read from GetSystemTimes rather than from PDH. Two reasons and both matter
+    /// for something meant to be published: a PDH counter path is LOCALISED, so
+    /// "\Processor Information(_Total)\% Processor Time" does not exist on a
+    /// German or Portuguese Windows, and GetSystemTimes costs a syscall against
+    /// PDH's measured 98 ms per counter sample.
+    public class CpuSample
+    {
+        public DateTime At;
+        public double MachinePct;      // 0..100 of the whole machine
+        public double OwnPct;          // the part of it inside our job objects
+        public double ForeignPct;      // MachinePct - OwnPct, floored at 0
+        public bool Valid;
+    }
+
+    /// Free memory, for the admission check.
+    ///
+    /// AvailableMib is GlobalMemoryStatusEx's ullAvailPhys, which is the honest
+    /// answer to "would starting a 6.5 GiB job hurt right now": it is physical
+    /// memory the system can hand out without taking it from somebody, standby
+    /// and free pages together. Commit headroom (ullAvailPageFile) is the wrong
+    /// number for this question, because a machine with a large page file has
+    /// plenty of it while already paging hard.
+    ///
+    /// Measured cost on spring: 0.001 ms per call, so it is free to poll.
+    public class MemorySample
+    {
+        public DateTime At;
+        public long TotalMib;
+        public long AvailableMib;
+        public int LoadPct;
         public bool Valid;
     }
 
@@ -145,6 +300,8 @@ namespace IdleGpu
         public double UtilVideoDecode;
         public double UtilVideoEncode;
         public bool CountersFresh;
+        public CpuSample Cpu;
+        public MemorySample Memory;
     }
 
     public class Verdict
@@ -164,6 +321,15 @@ namespace IdleGpu
         /// mapped it to Busy, which made WorkerState.Blocked unreachable after the
         /// first sample and turned the tray's grey icon into dead code.
         public bool Blind;
+
+        /// Which row of the limits matrix this instant lands on.
+        public MachineState MachineState = MachineState.Busy;
+
+        /// The row itself, already resolved. Never null after Evaluate.
+        public ResourceLimits Limits = new ResourceLimits();
+
+        /// Why that state and not the one above it, in one line, for the tray.
+        public string StateReason = "";
 
         public string ReasonText
         {
