@@ -142,8 +142,24 @@ if ($AtBoot) {
     if ($LASTEXITCODE -ne 0) {
         throw ("could not create the boot task (this needs an elevated prompt): " + ($r -join ' '))
     }
-    $autostart = "the scheduled task '$task', at boot, as SYSTEM"
-    $undo = "schtasks /Delete /TN $task /F"
+    # THE LOGON HALF. The boot task covers the machine while nobody is signed
+    # in; this covers it while somebody is signed in and not doing anything
+    # heavy, which is the case the boot task alone gives up. It holds no policy
+    # and decides nothing: it reports what only a session can see -- foreground
+    # window, input idle, Steam's running app id -- to loopback, and the agent
+    # decides. If it is not running, the agent falls back to refusing while
+    # somebody is signed in, which is the safe answer.
+    $startup = [Environment]::GetFolderPath('Startup')
+    $lnk = Join-Path $startup 'idlegpu-presence.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    $s = $shell.CreateShortcut($lnk)
+    $s.TargetPath = $trayExe
+    $s.Arguments = '--presence'
+    $s.WorkingDirectory = $Dest
+    $s.Description = 'idlegpu: tell the boot agent whether somebody is at this machine'
+    $s.Save()
+    $autostart = "the scheduled task '$task' at boot as SYSTEM, plus $lnk at logon"
+    $undo = "schtasks /Delete /TN $task /F; Remove-Item '$lnk'"
 } elseif (-not $NoAutostart) {
     if ($UseRunKey) {
         Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `

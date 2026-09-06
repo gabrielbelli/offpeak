@@ -7,6 +7,7 @@
 //   --watch N    print one line per second for N seconds and exit
 //   --calibrate  append every signal to a CSV for N minutes and exit
 //   --serve      the agent and its listener, headless, until Ctrl-C
+//   --presence   report this session's signals to an agent running at boot
 //   --tray       the actual product (default)
 //
 // --watch and --calibrate exit on their own. That is not decoration: it is what
@@ -115,6 +116,8 @@ namespace IdleGpu
             if (mode == "--calibrate") return Calibrate(cfg, rest.Count > 0 ? rest[0] : "calibration.csv",
                                                         rest.Count > 1 ? int.Parse(rest[1], CultureInfo.InvariantCulture) : 10);
             if (mode == "--serve") return Serve(cfg, rest.Count > 0 ? int.Parse(rest[0], CultureInfo.InvariantCulture) : 0);
+            // The logon half of a boot install. See Cli.Presence.
+            if (mode == "--presence") return Cli.Presence(cfg, rest.Count > 0 ? int.Parse(rest[0], CultureInfo.InvariantCulture) : 0);
             if (mode == "--help" || mode == "-h") { Cli.Usage(); return 0; }
             return Tray(cfg);
         }

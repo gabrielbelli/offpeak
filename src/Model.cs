@@ -68,11 +68,40 @@ namespace IdleGpu
         // which is why it was impossible before this field existed.
         public bool HasConsoleUser;
         public string ConsoleUserName;
+        // A HELPER IN THE USER'S SESSION IS REPORTING, AND ITS REPORT IS RECENT.
+        // An agent at boot lives in session 0, where Windows will not say who is
+        // at the keyboard, so it can only work while nobody is signed in. That
+        // gives up the case the machine spends most of its evenings in: signed
+        // in, and doing nothing heavy. A small helper started at logon reads the
+        // signals in the session that HAS them and posts them here, and while
+        // those reports keep arriving the agent is not blind and the ordinary
+        // policy applies. When they stop, this goes false within seconds and the
+        // conservative answer comes straight back.
+        public bool PresenceFresh;
         public int InputIdleSeconds;      // -1 when not measurable from this session
         public int ForegroundPid;
         public string ForegroundProcess;
         public string ForegroundTitle;
         public bool ForegroundIsFullScreen;
+    }
+
+    /// What the logon helper reports, and nothing else.
+    ///
+    /// Two groups, and both are needed. The session signals because
+    /// GetForegroundWindow and GetLastInputInfo answer for the CALLING session
+    /// and lie from session 0. Steam because it writes the running app id to
+    /// HKCU\Software\Valve\Steam, and a process running as SYSTEM reads SYSTEM's
+    /// hive, where there is no Steam and never will be -- so the tier 1 veto
+    /// that fires before a game renders its first frame is blind at boot too,
+    /// and that is the fastest signal the policy has.
+    public class PresenceReport
+    {
+        public int InputIdleSeconds = -1;
+        public bool Locked;
+        public bool ForegroundIsFullScreen;
+        public string ForegroundProcess = "";
+        public int SteamRunningAppId;
+        public string SteamRunningAppName = "";
     }
 
     public class LauncherSignals

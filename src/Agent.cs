@@ -363,6 +363,26 @@ namespace IdleGpu
         List<ProcessGpuUse> _lastVram = new List<ProcessGpuUse>();
         Dictionary<string, double> _lastEngines = new Dictionary<string, double>();
         DateTime _countersAt = DateTime.MinValue;
+        PresenceReport _presence;
+        DateTime _presenceAt = DateTime.MinValue;
+
+        /// How stale a presence report may be before it is ignored.
+        ///
+        /// The helper posts every second. Five seconds is enough to ride out a
+        /// missed tick or a slow moment without ever letting a helper that has
+        /// DIED keep the agent believing it can see the user. When this expires
+        /// the agent goes back to refusing while somebody is signed in, which is
+        /// the safe answer, and it does so within one sampling tick.
+        public static readonly TimeSpan PresenceTtl = TimeSpan.FromSeconds(5);
+
+        /// Called by the API when the logon helper posts. Cheap on purpose: it
+        /// takes the lock, stores two fields and returns, so a helper that hangs
+        /// or a caller that floods cannot sit in the sampling loop or, worse, in
+        /// the yield path.
+        public void SetPresence(PresenceReport r)
+        {
+            lock (_lock) { _presence = r; _presenceAt = DateTime.UtcNow; }
+        }
         int _lastCounterCostMs = -1;
 
         /// The published status document. Written by _fast once per tick, read by
@@ -567,6 +587,41 @@ namespace IdleGpu
                     s.GpuHealthy = _gpu.Healthy;
                     s.Session = Win.Read();
                     s.Launchers = Launchers.Read(_c.GameProcessNames, _c.AntiCheatServices);
+
+                    // WHAT SESSION 0 CANNOT SEE, SUPPLIED BY SOMEBODY WHO CAN.
+                    // Only ever an overlay, and only when this agent is outside
+                    // the console session: in the console session the local reads
+                    // are the truth and a helper could only make them worse.
+                    //
+                    // The launcher fields are merged rather than replaced. Process
+                    // scanning and the anti-cheat service check work perfectly
+                    // well from session 0 and are already in s.Launchers; it is
+                    // Steam's running app id that is missing, because it lives in
+                    // the user's registry hive. Replacing the whole object would
+                    // throw away two working vetoes to gain one.
+                    if (!s.Session.RunningInConsoleSession)
+                    {
+                        PresenceReport pr = null;
+                        lock (_lock)
+                        {
+                            if (_presence != null
+                                && (DateTime.UtcNow - _presenceAt) < PresenceTtl)
+                                pr = _presence;
+                        }
+                        if (pr != null)
+                        {
+                            s.Session.PresenceFresh = true;
+                            s.Session.InputIdleSeconds = pr.InputIdleSeconds;
+                            s.Session.Locked = pr.Locked;
+                            s.Session.ForegroundIsFullScreen = pr.ForegroundIsFullScreen;
+                            s.Session.ForegroundProcess = pr.ForegroundProcess;
+                            if (s.Launchers != null && pr.SteamRunningAppId != 0)
+                            {
+                                s.Launchers.SteamRunningAppId = pr.SteamRunningAppId;
+                                s.Launchers.SteamRunningAppName = pr.SteamRunningAppName;
+                            }
+                        }
+                    }
                     lock (_lock)
                     {
                         s.GpuProcesses = _lastVram;

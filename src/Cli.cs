@@ -98,9 +98,16 @@ namespace IdleGpu
             if (verb == "service") return Service(pos, cfg, raw);
 
             var client = new RunnerClient();
+            // NEVER cfg.Bind. 0.0.0.0 is where a listener ACCEPTS, not an address
+            // anything can dial, and using it here made `idlegpu health` fail on
+            // exactly the machines that had been opened to a LAN: "IPv4 address
+            // 0.0.0.0 ... cannot be used as a target address". A client on this
+            // machine wants loopback whatever the listener is bound to; only an
+            // explicit ClientHost or --host names somewhere else.
             client.Host = host != null ? host
                 : (!string.IsNullOrEmpty(cfg.ClientHost) ? cfg.ClientHost
-                   : (cfg.BindIsLoopback() ? "127.0.0.1" : cfg.Bind));
+                   : (cfg.BindIsLoopback() || cfg.Bind == "0.0.0.0" || cfg.Bind == "::"
+                      ? "127.0.0.1" : cfg.Bind));
             client.Port = port > 0 ? port : (cfg.ClientPort > 0 ? cfg.ClientPort : cfg.Port);
             client.Pin = fingerprint != null ? fingerprint
                 : (!string.IsNullOrEmpty(cfg.CertFingerprint) ? cfg.CertFingerprint : LocalPin(cfg));
@@ -141,6 +148,97 @@ namespace IdleGpu
                     client.Port.ToString(CultureInfo.InvariantCulture) + " - " + ex.Message);
                 return 1;
             }
+        }
+
+        /// The logon helper: report what only this session can see, once a second.
+        ///
+        /// Runs in the signed-in user's session, where GetForegroundWindow and
+        /// GetLastInputInfo answer for the right desktop and Steam's running app
+        /// id is in the reachable registry hive. Everything else -- the GPU, the
+        /// counters, process scanning, the anti-cheat service -- the agent reads
+        /// perfectly well for itself from session 0, so none of it is sent.
+        ///
+        /// It holds no policy and makes no decisions. It posts facts to loopback
+        /// and the agent decides, which keeps one copy of the policy rather than
+        /// two that can disagree.
+        ///
+        /// A failed post is not fatal and not retried hard: the agent expires a
+        /// report after a few seconds and falls back to refusing while somebody
+        /// is signed in, which is the safe answer. A helper that cannot reach the
+        /// agent must not spin, and must never be the reason a game stutters.
+        public static int Presence(Config cfg, int seconds)
+        {
+            var client = new RunnerClient();
+            client.Host = "127.0.0.1";
+            client.Port = cfg.ClientPort > 0 ? cfg.ClientPort : cfg.Port;
+            client.Pin = !string.IsNullOrEmpty(cfg.CertFingerprint)
+                ? cfg.CertFingerprint : LocalPin(cfg);
+            client.ApiKey = ReadKey(null, cfg);
+            client.TimeoutMs = 4000;
+
+            // IT MUST BE IN THE CONSOLE SESSION, AND IT CHECKS EVERY TICK.
+            //
+            // This helper exists to supply the signals session 0 cannot read. A
+            // copy of it running ANYWHERE ELSE -- started over SSH, from a
+            // scheduled task, from a second desktop session -- reads its own
+            // session and would report that nobody has touched the machine for
+            // ten minutes while somebody is mid-match. That is not a degraded
+            // report, it is the exact lie the whole design exists to prevent,
+            // and it would arrive stamped as authoritative.
+            //
+            // Checked in the loop rather than once at startup because sessions
+            // change underneath a process: fast user switching moves the console
+            // elsewhere and this helper must go quiet the moment it does.
+            DateTime until = seconds > 0
+                ? DateTime.UtcNow.AddSeconds(seconds) : DateTime.MaxValue;
+            int failures = 0;
+            bool warned = false;
+            while (DateTime.UtcNow < until)
+            {
+                SessionSignals ss = Win.Read();
+                if (!ss.RunningInConsoleSession)
+                {
+                    if (!warned)
+                    {
+                        Console.Error.WriteLine(
+                            "not reporting: this helper is in session "
+                            + ss.OwnSessionId.ToString(CultureInfo.InvariantCulture)
+                            + " and the console is session "
+                            + ss.ConsoleSessionId.ToString(CultureInfo.InvariantCulture)
+                            + ". It can only see the session it runs in, so anything"
+                            + " it said about the user would be false. Start it at"
+                            + " logon, from the Startup folder.");
+                        warned = true;
+                    }
+                    Thread.Sleep(5000);
+                    continue;
+                }
+                warned = false;
+                LauncherSignals ls = Launchers.Read(cfg.GameProcessNames,
+                                                    cfg.AntiCheatServices);
+                var q = new StringBuilder("/v1/presence?");
+                q.Append("input_idle_s=").Append(ss.InputIdleSeconds.ToString(CultureInfo.InvariantCulture));
+                q.Append("&locked=").Append(ss.Locked ? "1" : "0");
+                q.Append("&fullscreen=").Append(ss.ForegroundIsFullScreen ? "1" : "0");
+                q.Append("&fg_process=").Append(Uri.EscapeDataString(ss.ForegroundProcess ?? ""));
+                if (ls != null)
+                {
+                    q.Append("&steam_appid=").Append(ls.SteamRunningAppId.ToString(CultureInfo.InvariantCulture));
+                    q.Append("&steam_appname=").Append(Uri.EscapeDataString(ls.SteamRunningAppName ?? ""));
+                }
+                try
+                {
+                    Response r = client.Send("POST", q.ToString(), new byte[0], null, null);
+                    failures = r.Status == 200 ? 0 : failures + 1;
+                }
+                catch (Exception) { failures++; }
+
+                // The agent is not up, or not up yet. Back off to once every five
+                // seconds rather than hammering a socket that is not listening;
+                // the first success returns to one second.
+                Thread.Sleep(failures > 3 ? 5000 : 1000);
+            }
+            return 0;
         }
 
         static string LocalPin(Config cfg)

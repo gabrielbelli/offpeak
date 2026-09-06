@@ -134,7 +134,8 @@ namespace IdleGpu
             }
 
             if (s.Session != null && !s.Session.RunningInConsoleSession
-                && s.Session.HasConsoleUser && !s.Session.Locked)
+                && s.Session.HasConsoleUser && !s.Session.Locked
+                && !s.Session.PresenceFresh)
             {
                 // BLIND, AND SOMEBODY IS THERE. Measured on spring (probe p3,
                 // re-confirmed 2026-09-05): from session 0 GetForegroundWindow()

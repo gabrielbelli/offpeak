@@ -104,6 +104,8 @@ namespace IdleGpu
 
             if (seg.Length == 2 && seg[1] == "mode") { Mode(q, outp, ctx); return; }
 
+            if (seg.Length == 2 && seg[1] == "presence") { Presence(q, outp, ctx); return; }
+
             if (seg[1] == "assets") { Assets(q, seg, outp, ctx); return; }
 
             if (seg[1] == "services") { ServiceRoute(q, seg, outp, ctx); return; }
@@ -399,6 +401,51 @@ namespace IdleGpu
             }
 
             Http.WriteError(outp, 404, "no such route; GET / lists them");
+        }
+
+        // -- presence --------------------------------------------------------------
+
+        /// What the logon helper can see and this agent cannot.
+        ///
+        /// QUERY PARAMETERS, NOT A JSON BODY, and that is deliberate. This build
+        /// has a JSON writer and a shallow field peek, no parser, and writing one
+        /// to carry six scalars between two copies of the same program would be
+        /// the wrong trade. The shape is fixed, small, and both ends ship
+        /// together.
+        ///
+        /// It is authenticated like every other route. The helper runs as the
+        /// signed-in user and reads the same key file, which is inside the
+        /// install directory that user owns.
+        static void Presence(HttpRequest q, Stream outp, ApiContext ctx)
+        {
+            if (q.Method != "POST") { Http.WriteError(outp, 405, "POST only"); return; }
+            var r = new PresenceReport();
+            r.InputIdleSeconds = ParseInt(q.Param("input_idle_s"), -1);
+            r.Locked = ParseBool(q.Param("locked"));
+            r.ForegroundIsFullScreen = ParseBool(q.Param("fullscreen"));
+            r.ForegroundProcess = q.Param("fg_process");
+            if (r.ForegroundProcess == null) r.ForegroundProcess = "";
+            r.SteamRunningAppId = ParseInt(q.Param("steam_appid"), 0);
+            r.SteamRunningAppName = q.Param("steam_appname");
+            if (r.SteamRunningAppName == null) r.SteamRunningAppName = "";
+            ctx.Agent.SetPresence(r);
+            Http.WriteText(outp, 200, "application/json",
+                "{\"ok\":true,\"ttl_seconds\":"
+                + ((int)Agent.PresenceTtl.TotalSeconds).ToString(CultureInfo.InvariantCulture)
+                + "}\n");
+        }
+
+        static int ParseInt(string v, int fallback)
+        {
+            int n;
+            return int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)
+                ? n : fallback;
+        }
+
+        static bool ParseBool(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return false;
+            return v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase);
         }
 
         // -- mode ----------------------------------------------------------------
