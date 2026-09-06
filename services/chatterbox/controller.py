@@ -36,6 +36,7 @@ Windows box is a promise nobody should make.
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -104,6 +105,30 @@ class Runtime:
                 "FATAL: torch cannot see the GPU (%s). This is almost always the "
                 "CPU-only wheel from PyPI instead of a CUDA wheel from "
                 "download.pytorch.org. Re-run provision.ps1." % torch.__version__)
+
+        if self.device == "cuda":
+            # MATCH THE CPU'S NUMERICS, because the point of moving the work is
+            # to make it faster and not to make it different.
+            #
+            # On Ampere and later, torch leaves torch.backends.cudnn.allow_tf32
+            # TRUE by default. TF32 keeps float32's range and throws away most
+            # of its mantissa: 10 explicit bits against 23. It is a good trade
+            # for training and a questionable one for a convolutional vocoder,
+            # which is what turns this model's tokens back into a waveform, and
+            # the machine running the CPU copy has no such mode and never took
+            # that trade.
+            #
+            # So the two backends were not running the same arithmetic, and the
+            # one on the GPU was the lower-precision one. Both flags are set
+            # explicitly rather than left to a default that has changed between
+            # torch releases and differs between matmul and cudnn.
+            #
+            # THIS COSTS SPEED and that is the intended direction: quality first,
+            # and TF32 is available to anyone who wants it back.
+            allow = os.getenv("IDLEGPU_ALLOW_TF32", "0") not in ("0", "false", "no")
+            torch.backends.cudnn.allow_tf32 = allow
+            torch.backends.cuda.matmul.allow_tf32 = allow
+            svc.log("precision", tf32=allow)
 
         svc.log("loading model", torch=torch.__version__, cuda=torch.version.cuda,
                 device=torch.cuda.get_device_name(0) if self.device == "cuda" else "cpu")
