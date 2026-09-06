@@ -36,6 +36,7 @@ namespace IdleGpu
             Session0RefusesForEverAndSaysWhyItCannotTell();
             Session0WithNobodySignedInIsAllowedToWork();
             Session0WithALockedDesktopIsAllowedToWork();
+            OurOwnJobIsNotSomebodyElseUsingTheGpu();
             SteamVetoesBeforeTheGpuMoves();
             PausedGameIsCaughtByVramAlone();
             VideoPlaybackDoesNotYield();
@@ -188,6 +189,39 @@ namespace IdleGpu
             Ok(p.CanRun(Mode.Auto), "Auto will run");
             Ok(p.Last.ReasonText.Contains("locked"),
                 "the reason names the lock: " + p.Last.ReasonText);
+        }
+
+        /// THE DEFECT THIS PREVENTS, and it made the runner useless: the agent
+        /// yielding to its own job.
+        ///
+        /// Every tier 2 signal is a WHOLE-GPU reading with no owner attached, so
+        /// the moment our controller puts a model on the card the memory clock
+        /// goes to 6801 MHz and the performance state to P2 -- and tier 2 read
+        /// that as somebody else at the machine. Measured on the first real job
+        /// through this runner: started, saw the clocks it had itself caused,
+        /// yielded, killed the job tree, cooled down ninety seconds, repeated.
+        /// Four times, on a locked desktop with nobody near it, with the job
+        /// sitting queued throughout.
+        ///
+        /// The VRAM rule already had this exemption. The load votes did not.
+        static void OurOwnJobIsNotSomebodyElseUsingTheGpu()
+        {
+            Case("the agent does not yield to the load it created itself");
+            Policy p;
+            List<WorkerState> st = Run("own_job_is_the_load.csv", out p, 14416);
+            Ok(st[st.Count - 1] == WorkerState.Available,
+                "it stays Available while its own controller drives the card");
+            Ok(p.CanRun(Mode.Auto), "so the job is allowed to keep running");
+            Ok(!p.Last.ReasonText.Contains("memory clock"),
+                "and the clocks it caused are not quoted back as a reason: "
+                + p.Last.ReasonText);
+
+            // The same samples with the load belonging to somebody ELSE must
+            // still stop it, or this fix would have disabled tier 2 outright.
+            Policy q;
+            List<WorkerState> other = Run("own_job_is_the_load.csv", out q, -1);
+            Ok(other[other.Count - 1] != WorkerState.Available,
+                "identical load from an unknown process still stops it");
         }
 
         /// The single most important latency claim in the design. Steam writes

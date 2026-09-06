@@ -225,8 +225,34 @@ namespace IdleGpu
 
             // --- TIER 2: load votes. Something is DRAWING. --------------------
 
+            // NOT WHILE THE THING DRAWING IS OURS. Every signal below is a
+            // WHOLE-GPU reading with no owner attached to it, so the moment our
+            // own controller puts a model on the card the memory clock goes to
+            // 6801 MHz and the performance state to P2, and this tier reads that
+            // as somebody else at the machine.
+            //
+            // MEASURED, not hypothetical. The first real job through this runner
+            // never finished: the agent started the controller, saw the clocks it
+            // had itself caused about thirteen seconds later, yielded, killed the
+            // job tree, cooled down for ninety seconds and did it again. Four
+            // times, with the job sitting queued throughout, on a locked desktop
+            // with nobody near it.
+            //
+            // The VRAM rule already had this exemption -- see Snapshot.OwnJobPids
+            // and Policy.ForeignVram, added when a handoff made the agent yield to
+            // its own second controller. The load votes never got it, and they are
+            // the ones a GPU job trips hardest.
+            //
+            // TIER 1 IS DELIBERATELY NOT SUPPRESSED. Those vetoes identify a GAME
+            // -- Steam's running app id, a named process, the anti-cheat service,
+            // a full-screen window, another process holding VRAM -- and every one
+            // of them stays true whatever this agent is running. A game starting
+            // while our job holds the GPU must still win, in under six seconds,
+            // and it still does.
+            bool ourOwnLoad = s.OwnJobPids != null && s.OwnJobPids.Count > 0;
+
             var load = new List<string>();
-            if (s.Gpu != null && s.Gpu.Valid)
+            if (s.Gpu != null && s.Gpu.Valid && !ourOwnLoad)
             {
                 if (s.Gpu.ClockMemMhz > _c.MemClockBusyMhz)
                     load.Add(string.Format(CultureInfo.InvariantCulture,
@@ -251,7 +277,7 @@ namespace IdleGpu
             // a video would make the worker useless on a desktop that is nearly always
             // playing something. Measured at idle: videodecode 0.00 throughout, so
             // this is a decision about what to ignore, not about noise.
-            if (s.CountersFresh && s.Util3d > _c.Util3dBusyPct)
+            if (s.CountersFresh && s.Util3d > _c.Util3dBusyPct && !ourOwnLoad)
                 load.Add(string.Format(CultureInfo.InvariantCulture, "3D engine at {0:N0}%", s.Util3d));
 
             if (load.Count > 0)

@@ -82,6 +82,11 @@ namespace IdleGpu
         }
 
         const int JobObjectExtendedLimitInformation = 9;
+        const int JobObjectBasicProcessIdList = 3;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool QueryInformationJobObject(IntPtr job, int infoClass,
+            IntPtr info, uint len, out uint returned);
         const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
         const long ControllerLogCapBytes = 8L * 1024 * 1024;
 
@@ -127,6 +132,56 @@ namespace IdleGpu
         public bool Stopping { get { return _stopping; } }
 
         public int Pid { get { try { return _proc == null ? -1 : _proc.Id; } catch (Exception) { return -1; } } }
+
+        /// EVERY process in this job, not just the one we launched.
+        ///
+        /// The controller is a script; the thing that actually puts 2,249 MiB on
+        /// the card is a python CHILD of it with a different pid. Exempting only
+        /// the controller meant that child read as a foreign process holding GPU
+        /// memory, the VRAM veto fired, and the agent killed its own job -- then
+        /// cooled down for ninety seconds and did it again. Measured: four
+        /// restarts in a row on a locked desktop with nobody near the machine.
+        ///
+        /// Read from the JOB OBJECT rather than by walking ParentProcessId. Every
+        /// descendant is already assigned to it -- that is how KillTree works --
+        /// so this is exact, needs no second enumeration of every process on the
+        /// machine, and cannot be defeated by a process whose parent has exited.
+        public List<int> Pids
+        {
+            get
+            {
+                var found = new List<int>();
+                int own = Pid;
+                if (own > 0) found.Add(own);
+                if (_job == IntPtr.Zero) return found;
+
+                // Two IntPtr-sized counts, then the ids. Sized for plenty of
+                // children; a job larger than this returns what fits, and the
+                // controller itself is already in the list either way.
+                int slots = 256;
+                int bytes = (IntPtr.Size * 2) + (IntPtr.Size * slots);
+                IntPtr buf = Marshal.AllocHGlobal(bytes);
+                try
+                {
+                    Marshal.WriteIntPtr(buf, 0, new IntPtr(slots));
+                    Marshal.WriteIntPtr(buf, IntPtr.Size, IntPtr.Zero);
+                    uint got;
+                    if (!QueryInformationJobObject(_job, JobObjectBasicProcessIdList,
+                                                   buf, (uint)bytes, out got))
+                        return found;
+                    int n = Marshal.ReadIntPtr(buf, IntPtr.Size).ToInt32();
+                    if (n > slots) n = slots;
+                    for (int i = 0; i < n; i++)
+                    {
+                        int pid = Marshal.ReadIntPtr(buf, (IntPtr.Size * 2) + (i * IntPtr.Size)).ToInt32();
+                        if (pid > 0 && !found.Contains(pid)) found.Add(pid);
+                    }
+                }
+                catch (Exception) { }
+                finally { Marshal.FreeHGlobal(buf); }
+                return found;
+            }
+        }
 
         // The measurement this program exists to produce. LastYieldMs is the wall
         // time from the policy saying yield to the child process being gone, which
@@ -640,8 +695,10 @@ namespace IdleGpu
                     // agent yield to itself.
                     foreach (JobRunner j in _jobs.Values)
                     {
-                        int pid = j.Pid;
-                        if (pid > 0) s.OwnJobPids.Add(pid);
+                        // The whole job object, not just the controller. See
+                        // JobRunner.Pids: the child is what holds the VRAM.
+                        foreach (int pid in j.Pids)
+                            if (pid > 0) s.OwnJobPids.Add(pid);
                     }
 
                     Verdict v = _policy.Evaluate(s);

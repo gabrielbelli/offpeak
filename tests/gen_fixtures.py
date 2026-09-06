@@ -154,6 +154,23 @@ def main():
     s0_locked = [dict(r, console_user="someone", locked="1") for r in s0]
     write("session0_locked.csv", s0_locked, COLS_WITH_USER)
 
+    # 2d. OUR OWN JOB IS THE LOAD. A controller putting a model on the card
+    #     drives the memory clock to 6801 MHz and the performance state to P2,
+    #     which is exactly what tier 2 watches for. Recorded from the real
+    #     failure: the agent started the controller, saw the clocks it had
+    #     itself caused, yielded, killed the job, cooled down and repeated.
+    #
+    #     vram_top_pid is the controller, so it is exempt from the VRAM veto the
+    #     way a real one is; the point of this fixture is the LOAD votes, which
+    #     had no such exemption.
+    own = [dict(r) for r in idle]
+    for r in own[20:]:
+        r.update({"mem_clk_mhz": "6801", "pstate": "P2", "power_w": "120.0",
+                  "util_gpu": "88", "eng_3d": "0.00",
+                  "vram_top_pid": "14416", "vram_top_name": "python",
+                  "vram_top_mib": "3200"})
+    write("own_job_is_the_load.csv", own)
+
     # 3. Steam sets RunningAppID before the game renders its first frame, so the
     #    GPU columns here stay at the measured idle values throughout. This is
     #    the fixture that proves the veto does not wait for the GPU to move.
