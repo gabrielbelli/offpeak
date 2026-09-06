@@ -188,8 +188,38 @@ namespace IdleGpu
         /// Schannel insists on writing to %APPDATA%\Microsoft\Crypto\Keys while a
         /// TLS certificate is loaded. src/Certs.cs explains why it cannot be
         /// redirected and how it is swept.
-        public string DataDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "idlegpu");
+        public string DataDir = DefaultDataDir();
+
+        /// Where this build keeps everything: the directory the executable is in.
+        ///
+        /// NOT %LOCALAPPDATA%, WHICH IS PER ACCOUNT AND BROKE THE BOOT TASK.
+        /// The installer copies the exe, worker.ini, the services and the runtime
+        /// into one folder, so the folder holding the exe IS the install and
+        /// deriving from it is both correct and account independent. Reading
+        /// %LOCALAPPDATA% instead meant a task running as SYSTEM resolved to
+        /// C:\Windows\System32\config\systemprofile\AppData\Local\idlegpu, an
+        /// empty directory, and reported no installed services at all while two
+        /// sat provisioned and ready a few folders away. Measured, not feared.
+        ///
+        /// The fallback covers a build run from somewhere unreadable or a host
+        /// that will not answer for its own assembly location, and it restores
+        /// exactly the old behaviour rather than inventing a third one.
+        static string DefaultDataDir()
+        {
+            try
+            {
+                string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                if (!string.IsNullOrEmpty(exe))
+                {
+                    string dir = Path.GetDirectoryName(exe);
+                    if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir)) return dir;
+                }
+            }
+            catch (Exception) { }
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "idlegpu");
+        }
 
         /// The tray mode, persisted. Auto | AlwaysOn | Off.
         public string StartMode = "Auto";

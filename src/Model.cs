@@ -58,6 +58,16 @@ namespace IdleGpu
         public uint OwnSessionId;
         public bool RunningInConsoleSession;
         public bool Locked;
+        // IS ANYBODY SIGNED IN AT ALL, as opposed to signed in and unobservable.
+        // Being outside the console session used to be one state, "blind", and it
+        // was treated as an absolute veto. That conflated two situations that
+        // could not be more different: somebody is at the keyboard and this agent
+        // cannot see them, versus nobody is at the keyboard at all. The second is
+        // the SAFEST moment there is to use the machine, and it was the one being
+        // refused. A service starting at boot lives in that state permanently,
+        // which is why it was impossible before this field existed.
+        public bool HasConsoleUser;
+        public string ConsoleUserName;
         public int InputIdleSeconds;      // -1 when not measurable from this session
         public int ForegroundPid;
         public string ForegroundProcess;

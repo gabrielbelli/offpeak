@@ -351,6 +351,38 @@ namespace IdleGpu
         [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
         [DllImport("kernel32.dll")] static extern bool ProcessIdToSessionId(uint pid, out uint sid);
 
+        // WHO IS SIGNED IN ON THE CONSOLE, answerable from session 0 where
+        // GetLastInputInfo and GetForegroundWindow are not. This is the whole
+        // reason a service can be safe: it cannot see a user, but it CAN see
+        // whether there is one.
+        [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool WTSQuerySessionInformationW(IntPtr server, uint sessionId,
+            int infoClass, out IntPtr buffer, out uint bytes);
+        [DllImport("wtsapi32.dll")] static extern void WTSFreeMemory(IntPtr p);
+        const int WTSUserName = 5;
+
+        /// The account signed in on the console session, or "" if nobody is.
+        ///
+        /// At the sign-in screen the console session exists and is running
+        /// LogonUI, but it has no user name, so this returns "". That is the
+        /// difference between "a machine waiting for somebody" and "somebody's
+        /// desktop", and it is not visible any other way from session 0.
+        static string ConsoleUser(uint sessionId)
+        {
+            IntPtr buf = IntPtr.Zero;
+            uint bytes = 0;
+            try
+            {
+                if (!WTSQuerySessionInformationW(IntPtr.Zero, sessionId, WTSUserName,
+                                                 out buf, out bytes))
+                    return "";
+                string name = Marshal.PtrToStringUni(buf);
+                return name == null ? "" : name.Trim();
+            }
+            catch (Exception) { return ""; }
+            finally { if (buf != IntPtr.Zero) WTSFreeMemory(buf); }
+        }
+
         const uint MONITOR_DEFAULTTONEAREST = 2;
 
         /// Collects everything the OS will tell us about the human at the keyboard.
@@ -378,6 +410,8 @@ namespace IdleGpu
             uint own;
             s.OwnSessionId = ProcessIdToSessionId((uint)Process.GetCurrentProcess().Id, out own) ? own : 0xFFFFFFFF;
             s.RunningInConsoleSession = (s.OwnSessionId == s.ConsoleSessionId);
+            s.ConsoleUserName = ConsoleUser(s.ConsoleSessionId);
+            s.HasConsoleUser = s.ConsoleUserName.Length > 0;
 
             // Lock detection. LogonUI.exe exists only while the secure desktop is
             // up. Measured unlocked on spring (probe p3): no LogonUI process at all,

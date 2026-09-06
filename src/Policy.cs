@@ -133,21 +133,46 @@ namespace IdleGpu
                 v.Reasons.Add("nvidia-smi stream is stale or dead");
             }
 
-            if (s.Session != null && !s.Session.RunningInConsoleSession)
+            if (s.Session != null && !s.Session.RunningInConsoleSession
+                && s.Session.HasConsoleUser && !s.Session.Locked)
             {
-                // Measured on spring (probe p3, re-confirmed 2026-09-05): over SSH
-                // the agent lands in session 0 while the user is on the console in
-                // session 1, and from there GetForegroundWindow() returns 0 and
-                // GetLastInputInfo() reports the SSH session's own idle time -
-                // 620953 ms, which is a lie about the user. An agent in the wrong
-                // session cannot see the person it is supposed to yield to, so it
-                // must not claim the GPU. This is also why the agent installs as a
-                // Run key and not as a Windows service: a service sits in session 0
-                // permanently and would be blind in exactly this way.
+                // BLIND, AND SOMEBODY IS THERE. Measured on spring (probe p3,
+                // re-confirmed 2026-09-05): from session 0 GetForegroundWindow()
+                // returns 0 and GetLastInputInfo() reports the calling session's
+                // own idle time - 620953 ms, which is a lie about the user. This
+                // agent cannot see the person it exists to get out of the way of,
+                // and somebody IS signed in and not locked, so it must not claim
+                // the GPU.
+                //
+                // THE TWO CONDITIONS ABOVE ARE THE WHOLE POINT. This used to veto
+                // on the session mismatch alone, which made a Windows service
+                // impossible: a service is permanently in session 0, so it was
+                // permanently blind, so it could never run. But "I cannot see the
+                // user" and "there is no user" are different states, and the
+                // second is the safest moment this program will ever get. See the
+                // clause below.
                 v.WantsGpu = true; v.IsVeto = true; v.Blind = true;
                 v.Reasons.Add(string.Format(CultureInfo.InvariantCulture,
-                    "agent is in session {0}, console is session {1}: cannot observe the user",
-                    s.Session.OwnSessionId, s.Session.ConsoleSessionId));
+                    "agent is in session {0}, console is session {1} and {2} is "
+                    + "signed in: cannot observe the user",
+                    s.Session.OwnSessionId, s.Session.ConsoleSessionId,
+                    s.Session.ConsoleUserName));
+            }
+            else if (s.Session != null && !s.Session.RunningInConsoleSession)
+            {
+                // NOBODY IS AT THIS MACHINE, or the desktop is locked. Not a veto,
+                // and not "blind" either: there is nothing to be blind to. At the
+                // sign-in screen the console session exists but has no user name,
+                // and a locked session has a user who is demonstrably not at the
+                // keyboard. Both are recorded so `status` explains why a service
+                // is allowed to work rather than leaving it looking like the check
+                // was skipped.
+                //
+                // This is the state a service lives in from boot until somebody
+                // signs in, and it is most of a gaming PC's uptime.
+                v.Reasons.Add(s.Session.HasConsoleUser
+                    ? "the desktop is locked, so nobody is at the machine"
+                    : "nobody is signed in at this machine");
             }
 
             // --- TIER 1: vetoes. A game EXISTS. -------------------------------

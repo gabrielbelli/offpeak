@@ -102,10 +102,20 @@ def busy_gpu(row):
     return row
 
 
-def write(name, rows):
+# console_user is NOT in COLS, and that is deliberate. Replay treats the column
+# being ABSENT as "recorded before this distinction existed, assume somebody is
+# signed in", which is what every fixture written before it means. Adding it to
+# COLS would put an empty value in all of them and silently flip
+# session0_blocked.csv from a veto to a pass -- the exact test that guards the
+# promise. Only the fixtures that are ABOUT who is signed in carry it.
+COLS_WITH_USER = COLS[:COLS.index("console_session") + 1] + ["console_user"] \
+    + COLS[COLS.index("console_session") + 1:]
+
+
+def write(name, rows, cols=None):
     path = os.path.join(FIX, name)
     with open(path, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=COLS)
+        w = csv.DictWriter(fh, fieldnames=(cols or COLS))
         w.writeheader()
         for r in rows:
             w.writerow(r)
@@ -125,6 +135,24 @@ def main():
     s0 = [dict(r, own_session="0", console_session="1",
                input_idle_s="620953", fg_process="") for r in idle]
     write("session0_blocked.csv", s0)
+
+    # 2b. THE SAME BLINDNESS, WITH NOBODY THERE. A service starts at boot and
+    #     lives here until somebody signs in: session 0, a console session that
+    #     exists and is running the sign-in screen, and NO user name on it.
+    #     Being unable to see a user is not a reason to refuse when there is no
+    #     user, and this is most of a gaming PC's uptime.
+    #
+    #     console_user is written empty ON PURPOSE. The column being present and
+    #     empty is the assertion; a fixture without the column at all means
+    #     "recorded before this distinction existed" and keeps the old veto.
+    s0_nobody = [dict(r, console_user="") for r in s0]
+    write("session0_nobody_signed_in.csv", s0_nobody, COLS_WITH_USER)
+
+    # 2c. Signed in, but the desktop is locked. The user is demonstrably not at
+    #     the keyboard, and a locked machine was already documented as the
+    #     safest possible time to run. Session 0 does not change that.
+    s0_locked = [dict(r, console_user="someone", locked="1") for r in s0]
+    write("session0_locked.csv", s0_locked, COLS_WITH_USER)
 
     # 3. Steam sets RunningAppID before the game renders its first frame, so the
     #    GPU columns here stay at the measured idle values throughout. This is

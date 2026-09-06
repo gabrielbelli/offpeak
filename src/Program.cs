@@ -277,6 +277,7 @@ namespace IdleGpu
                             s.CountersFresh ? "1" : "0",
                             s.Session == null ? "" : s.Session.OwnSessionId.ToString(CultureInfo.InvariantCulture),
                             s.Session == null ? "" : s.Session.ConsoleSessionId.ToString(CultureInfo.InvariantCulture),
+                            s.Session == null ? "" : s.Session.ConsoleUserName,
                             s.Session == null ? "" : (s.Session.Locked ? "1" : "0"),
                             s.Session == null ? "" : s.Session.InputIdleSeconds.ToString(CultureInfo.InvariantCulture),
                             s.Session == null ? "" : (s.Session.ForegroundIsFullScreen ? "1" : "0"),

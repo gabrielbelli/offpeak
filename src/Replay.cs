@@ -33,7 +33,7 @@ namespace IdleGpu
         public const string Header =
             "iso_time,state,util_gpu,util_mem,enc,dec,mem_clk_mhz,sm_clk_mhz,pstate,power_w," +
             "mem_used_mib,eng_3d,eng_decode,eng_encode,gpu_healthy,counters_fresh," +
-            "own_session,console_session,locked,input_idle_s,fullscreen,fg_process," +
+            "own_session,console_session,console_user,locked,input_idle_s,fullscreen,fg_process," +
             "steam_appid,steam_appname,vgc,anticheat_svc,game_procs,vram_top_pid,vram_top_name,vram_top_mib,reason";
 
         public static List<Snapshot> Load(string path)
@@ -87,6 +87,18 @@ namespace IdleGpu
             ss.OwnSessionId = (uint)I(Get(f, idx, "own_session"));
             ss.ConsoleSessionId = (uint)I(Get(f, idx, "console_session"));
             ss.RunningInConsoleSession = ss.OwnSessionId == ss.ConsoleSessionId;
+            // ABSENT AND EMPTY MEAN DIFFERENT THINGS HERE, which is why this is
+            // not one line. A fixture recorded before this column existed says
+            // nothing about who is signed in, and every one of those was written
+            // when being outside the console session was an unconditional veto,
+            // so the old meaning is preserved by assuming somebody is there. A
+            // fixture that HAS the column and leaves it empty is asserting the
+            // opposite -- an unattended machine -- which is the case a service
+            // lives in and the reason the column was added.
+            ss.ConsoleUserName = Get(f, idx, "console_user");
+            ss.HasConsoleUser = idx.ContainsKey("console_user")
+                ? ss.ConsoleUserName.Length > 0
+                : true;
             ss.Locked = B(Get(f, idx, "locked"), false);
             ss.InputIdleSeconds = I(Get(f, idx, "input_idle_s"));
             ss.ForegroundIsFullScreen = B(Get(f, idx, "fullscreen"), false);

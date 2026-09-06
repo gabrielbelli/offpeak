@@ -43,7 +43,25 @@
 param(
     [string]$Dest = (Join-Path $env:LOCALAPPDATA 'idlegpu'),
     [switch]$UseRunKey,
-    [switch]$NoAutostart
+    [switch]$NoAutostart,
+    # AT BOOT, BEFORE ANYBODY SIGNS IN, as a scheduled task running as SYSTEM.
+    # Needs administrator once, to create the task.
+    #
+    # WHAT IT BUYS: the machine works while it is switched on and nobody is
+    # using it, which on most desktops is most of the day. A logon autostart
+    # cannot do that, because there is no logon.
+    #
+    # WHAT IT COSTS, and this is not small. A task at boot runs in session 0,
+    # where Windows will not tell it who is at the keyboard: GetForegroundWindow
+    # returns 0 and GetLastInputInfo reports the calling session. The agent
+    # therefore works only while NOBODY is signed in, or while the desktop is
+    # LOCKED, and it stands down completely the moment somebody signs in. So it
+    # covers the unattended machine and gives up the "signed in but not gaming"
+    # case that a logon autostart covers.
+    #
+    # PICK ONE. Both would race for the same port, and the boot one wins because
+    # it started first, so installing both means the logon one never binds.
+    [switch]$AtBoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,7 +126,25 @@ $example = Join-Path $here 'worker.ini.example'
 if (-not (Test-Path $ini) -and (Test-Path $example)) { Copy-Item $example $ini }
 if (Test-Path $example) { Copy-Item $example (Join-Path $Dest 'worker.ini.example') -Force }
 
-if (-not $NoAutostart) {
+if ($AtBoot) {
+    # A scheduled task, not a Windows service, because a service must implement
+    # ServiceBase and answer the service control manager within 30 seconds, and
+    # this agent is a plain program. A task with /sc onstart gets the same
+    # thing -- session 0, SYSTEM, before any logon -- with no service host to
+    # write and no extra failure mode.
+    #
+    # SYSTEM rather than the installing user, because "run whether logged on or
+    # not" as a user requires storing that user's password. Nothing here asks
+    # anybody for a password.
+    $task = 'idlegpu'
+    $cmd = '"' + $exe + '" --serve'
+    $r = & schtasks.exe /Create /TN $task /TR $cmd /SC ONSTART /RU SYSTEM /RL HIGHEST /F 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("could not create the boot task (this needs an elevated prompt): " + ($r -join ' '))
+    }
+    $autostart = "the scheduled task '$task', at boot, as SYSTEM"
+    $undo = "schtasks /Delete /TN $task /F"
+} elseif (-not $NoAutostart) {
     if ($UseRunKey) {
         Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
             -Name 'idlegpu' -Value ('"' + $trayExe + '"')

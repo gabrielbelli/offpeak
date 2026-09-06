@@ -34,6 +34,8 @@ namespace IdleGpu
             IdleDesktopEventuallyRunsJobs();
             IdleDesktopNeverLooksBusy();
             Session0RefusesForEverAndSaysWhyItCannotTell();
+            Session0WithNobodySignedInIsAllowedToWork();
+            Session0WithALockedDesktopIsAllowedToWork();
             SteamVetoesBeforeTheGpuMoves();
             PausedGameIsCaughtByVramAlone();
             VideoPlaybackDoesNotYield();
@@ -153,6 +155,39 @@ namespace IdleGpu
             Ok(!p.CanRun(Mode.Auto), "Auto will not run");
             Ok(p.Last.ReasonText.Contains("session 0") && p.Last.ReasonText.Contains("cannot observe"),
                 "and the reason names the session, not a game: " + p.Last.ReasonText);
+        }
+
+        /// THE DEFECT THIS PREVENTS: refusing to work when there is nobody to
+        /// yield to. Being unable to observe a user was treated as an absolute
+        /// veto, which conflated "somebody is there and I cannot see them" with
+        /// "nobody is there". The second is the safest moment this program will
+        /// ever get, and it is most of a gaming PC's uptime -- and it is the
+        /// state a service lives in from boot until somebody signs in.
+        static void Session0WithNobodySignedInIsAllowedToWork()
+        {
+            Case("session 0 with nobody signed in is free to work");
+            Policy p;
+            List<WorkerState> st = Run("session0_nobody_signed_in.csv", out p);
+            Ok(st[st.Count - 1] == WorkerState.Available,
+                "the last sample is Available, not Blocked");
+            Ok(p.CanRun(Mode.Auto), "Auto will run");
+            Ok(!p.Last.Blind, "and it is not reported as blind: there is nothing to be blind to");
+            Ok(p.Last.ReasonText.Contains("nobody is signed in"),
+                "the reason says why it is allowed: " + p.Last.ReasonText);
+        }
+
+        /// A locked desktop was already documented as the safest possible time to
+        /// run. Being in session 0 does not change that, and treating it as blind
+        /// threw the case away.
+        static void Session0WithALockedDesktopIsAllowedToWork()
+        {
+            Case("session 0 with the desktop locked is free to work");
+            Policy p;
+            List<WorkerState> st = Run("session0_locked.csv", out p);
+            Ok(st[st.Count - 1] == WorkerState.Available, "the last sample is Available");
+            Ok(p.CanRun(Mode.Auto), "Auto will run");
+            Ok(p.Last.ReasonText.Contains("locked"),
+                "the reason names the lock: " + p.Last.ReasonText);
         }
 
         /// The single most important latency claim in the design. Steam writes
