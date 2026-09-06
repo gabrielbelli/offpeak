@@ -40,6 +40,19 @@ ListenerEnabled      = true
 #
 # Set Bind = 0.0.0.0 only if you also set an ApiKeyFile and AllowedCidrs. The
 # agent refuses to start a non-loopback listener without both.
+# HOW MANY THREADS THE HUNDRED PER CENT ROW TAKES. 0, the default, means every
+# logical thread on the machine.
+#
+# Measured on an 8 core / 16 thread Ryzen 5700X3D, one model load, no cap, only
+# the thread count varying: 8 threads 0.249x realtime, 12 threads 0.271x, and 16
+# threads 0.271x. The knee is 12 and 16 costs nothing over it. The rule this
+# replaced stopped at the PHYSICAL core count, which was inferred from a sweep on
+# a 2016 Xeon and left 9% unclaimed here.
+#
+# Set it if your chip disagrees. Leaving four threads to the machine costs about
+# 0.1% on the one measured, and this row only applies when nobody is signed in.
+# CpuThreadsAtFull   = 12
+
 Bind                 = 127.0.0.1
 Port                 = 47600
 
