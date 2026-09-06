@@ -746,26 +746,56 @@ namespace IdleGpu
         /// cache on the way. The cap decides how much; this decides how thinly it
         /// is spread.
         ///
-        /// AT ONE HUNDRED PER CENT THE ANSWER IS THE PHYSICAL CORE COUNT, not the
-        /// logical one and not "leave the default alone". Chatterbox's T3
-        /// transformer is autoregressive at batch one, which is work bound by
-        /// single-thread latency rather than by throughput, and the NAS thread
-        /// sweep is unambiguous about what that does to scaling: 0.077 realtime at
-        /// 2 threads, 0.230 at 8, 0.285 at 16 - per-thread efficiency halving from
-        /// 2 to 16. Two sibling threads on one core share the L1, the L2 and the
-        /// front end, so SMT buys almost nothing here and costs cache residency on
-        /// a model whose whole advantage is a 96 MiB L3 it walks every token.
+        /// AT ONE HUNDRED PER CENT THE ANSWER IS EVERY LOGICAL THREAD, and this
+        /// was the physical core count until it was measured on the machine that
+        /// actually runs the work.
+        ///
+        /// The physical-core rule was inferred from the NAS sweep, where
+        /// Chatterbox went 0.230 realtime at 8 threads to 0.285 at 16 with
+        /// per-thread efficiency halving, and from the reasoning that two sibling
+        /// threads share the L1, the L2 and the front end, so SMT should buy
+        /// almost nothing on a model whose advantage is a 96 MiB L3 it walks
+        /// every token. Sound reasoning, wrong answer, and the difference is that
+        /// the NAS is an 18 core Xeon from 2016 and the runner is an 8 core Ryzen
+        /// from 2022. A rule inferred on one chip does not transfer to another.
+        ///
+        /// MEASURED DIRECTLY on the runner, one model load, no cap, no job
+        /// object, only the thread count varying:
+        ///
+        ///      2 threads  0.132x
+        ///      4 threads  0.211x
+        ///      8 threads  0.249x     &lt;- what the physical-core rule gave
+        ///     12 threads  0.271x     +9% over 8
+        ///     16 threads  0.271x     +0.1% over 12, which is noise
+        ///
+        /// So the old rule left 9% on the table on the only machine anybody has
+        /// run this on. The knee is 12 and 16 costs nothing over it, so the
+        /// hundred per cent row takes the whole machine, which is also what the
+        /// row MEANS: it applies when nobody is signed in.
+        ///
+        /// CpuThreadsAtFull overrides it for anyone whose chip disagrees. Leaving
+        /// four threads to the machine costs 0.1% here and may be worth more than
+        /// that elsewhere.
         ///
         /// DETECTED, NEVER ASSUMED. Both counts are passed in. A stranger's
         /// machine is not sixteen threads and is not eight cores, and when the
-        /// physical count cannot be read the logical one is used, which is the old
-        /// behaviour rather than a guess.
+        /// physical count cannot be read the logical one is used.
+        /// How many threads the hundred per cent row takes. 0 means every
+        /// logical thread, which is the measured answer on the only machine this
+        /// has run on. See ThreadsFor for the numbers.
+        ///
+        /// Static because ThreadsFor is, and ThreadsFor is static because the
+        /// policy is plain data the tests drive without a Config at all.
+        public static int CpuThreadsAtFull;
+
         public static int ThreadsFor(ResourceLimits l, int logical, int physical)
         {
             if (logical < 1) logical = 1;
             if (physical < 1 || physical > logical) physical = logical;
             if (l == null || l.CpuPct <= 0) return 0;      // 0 = leave the default alone
-            if (l.CpuPct >= 100) return physical;
+            if (l.CpuPct >= 100) return CpuThreadsAtFull > 0
+                ? (CpuThreadsAtFull > logical ? logical : CpuThreadsAtFull)
+                : logical;
             int n = (int)Math.Round(logical * l.CpuPct / 100.0);
             if (n < 1) n = 1;
             return n > physical ? physical : n;
@@ -1030,6 +1060,7 @@ namespace IdleGpu
                 case "idleafterseconds": c.IdleAfterSeconds = int.Parse(v, CultureInfo.InvariantCulture); break;
                 case "foreigncpubusypct": c.ForeignCpuBusyPct = double.Parse(v, CultureInfo.InvariantCulture); break;
                 case "gameprocessnames": c.GameProcessNames = Split(v); break;
+                case "cputhreadsatfull": CpuThreadsAtFull = int.Parse(v, CultureInfo.InvariantCulture); break;
                 case "vramallowlist": c.VramAllowlist = Split(v); break;
                 case "idlepstates": c.IdlePStates = Split(v); break;
                 case "anticheatservices": c.AntiCheatServices = Split(v); break;

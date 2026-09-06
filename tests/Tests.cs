@@ -1570,9 +1570,16 @@ namespace IdleGpu
         /// this model's whole advantage is a 96 MiB L3 it walks every token.
         static void ThreadCountFollowsTheCapAndStopsAtPhysicalCores()
         {
-            Case("the thread count follows the cap and stops at physical cores");
-            Ok(Config.ThreadsFor(Config.Rung(0), 16, 8) == 8,
-                "unlimited on 8 cores and 16 threads asks for 8, not 16 (got "
+            Case("the thread count follows the cap, and takes the machine at full");
+            // MEASURED ON THE RUNNER, one model load, no cap, only the thread
+            // count varying: 8 threads 0.249x, 12 threads 0.271x, 16 threads
+            // 0.271x. The physical-core rule this replaces was inferred from a
+            // sweep on a 2016 Xeon and gave 8 here, leaving 9% unclaimed on the
+            // machine that actually runs the work. 16 costs nothing over 12, and
+            // the hundred per cent row applies when nobody is signed in.
+            Config.CpuThreadsAtFull = 0;
+            Ok(Config.ThreadsFor(Config.Rung(0), 16, 8) == 16,
+                "unlimited on 8 cores and 16 threads asks for all 16 (got "
                 + Config.ThreadsFor(Config.Rung(0), 16, 8) + ")");
             Ok(Config.ThreadsFor(Config.Rung(1), 16, 8) == 8, "fifty per cent of sixteen is eight");
             Ok(Config.ThreadsFor(Config.Rung(2), 16, 8) == 2, "ten per cent of sixteen rounds to two");
@@ -1581,6 +1588,14 @@ namespace IdleGpu
 
             // DETECTED, NEVER ASSUMED. A stranger's machine is not sixteen threads.
             Ok(Config.ThreadsFor(Config.Rung(0), 4, 4) == 4, "a four thread machine asks for four");
+
+            // The override, for a chip that disagrees with the one measured.
+            Config.CpuThreadsAtFull = 12;
+            Ok(Config.ThreadsFor(Config.Rung(0), 16, 8) == 12,
+                "CpuThreadsAtFull is honoured at full");
+            Ok(Config.ThreadsFor(Config.Rung(0), 8, 4) == 8,
+                "and never asks for more threads than the machine has");
+            Config.CpuThreadsAtFull = 0;
             Ok(Config.ThreadsFor(Config.Rung(2), 4, 4) == 1,
                 "and ten per cent of four is one, never zero, because zero threads is no job");
 
