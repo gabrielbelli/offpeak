@@ -427,8 +427,21 @@ namespace IdleGpu
         /// states are turned into JSON. Kept here rather than in Api.cs so that the
         /// CLI's `service list` and the API cannot drift into disagreeing about what
         /// "installed" means.
+        /// Without an agent there is nobody to ask whether the machine is free
+        /// right now, so `available` is published as null rather than as false.
+        /// `idlegpu service list` runs in a separate process from the agent and
+        /// used to have no way to say "I do not know"; false would have read as
+        /// "busy" to anything parsing it.
         public static string Json(ServiceDef d, ServiceStatus st, bool running, int queued,
                                   string manifest, int graceSeconds)
+        {
+            return Json(d, st, running, queued, manifest, graceSeconds,
+                        d.WantsGpu ? "gpu" : "cpu", null, "");
+        }
+
+        public static string Json(ServiceDef d, ServiceStatus st, bool running, int queued,
+                                  string manifest, int graceSeconds,
+                                  string device, bool? available, string unavailableReason)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -456,6 +469,16 @@ namespace IdleGpu
 
             sb.Append(IdleGpu.Json.P("running", running ? "true" : "false")).Append(",");
             sb.Append(IdleGpu.Json.P("queued", IdleGpu.Json.Num(queued))).Append(",");
+            // WHICH RESOURCE, AND WILL IT RUN NOW. `device` is what this service
+            // is after; `available` is this machine's answer for it, already
+            // resolved against the right gate. A client should read `available`
+            // and never try to work it out from gpu_available and a device name,
+            // because that is the calculation this runner exists to do for them.
+            sb.Append(IdleGpu.Json.P("device", IdleGpu.Json.Esc(device))).Append(",");
+            sb.Append(IdleGpu.Json.P("available",
+                available.HasValue ? (available.Value ? "true" : "false") : "null")).Append(",");
+            sb.Append(IdleGpu.Json.P("unavailable_reason",
+                string.IsNullOrEmpty(unavailableReason) ? "null" : IdleGpu.Json.Esc(unavailableReason))).Append(",");
             sb.Append("\"manifest\":").Append(manifest == null ? "null" : manifest);
             sb.Append("}");
             return sb.ToString();

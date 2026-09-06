@@ -1423,6 +1423,22 @@ namespace IdleGpu
             // on purpose.
             sb.Append(Json.P("gpu_available", can ? "true" : "false")).Append(",");
             sb.Append(Json.P("gpu_state", Json.Esc(Policy.Describe(_policy.State)))).Append(",");
+            // THE RUNNER SELLS TWO THINGS NOW, so one boolean can no longer answer
+            // "will you work for me". A client that reads only gpu_available walks
+            // away from a machine that would happily have run its job on twelve
+            // idle threads, and one that reads only cpu_available walks into a
+            // game. Both are published, and so is the per service `available`
+            // below, which is the one a client should actually read: it is this
+            // machine's answer for THAT service, already resolved.
+            sb.Append(Json.P("cpu_available", _policy.CanRunCpu(Mode) ? "true" : "false")).Append(",");
+            sb.Append(Json.P("machine_state", Json.Esc(Config.StateKey(_policy.MachineState)))).Append(",");
+            sb.Append(Json.P("machine_state_reason", Json.Esc(_policy.Last.StateReason))).Append(",");
+            sb.Append("\"limits\":").Append(Json.Obj(
+                Json.P("gpu", _policy.Limits.Gpu ? "true" : "false"),
+                Json.P("cpu_pct", Json.Num(_policy.Limits.CpuPct)),
+                Json.P("priority", Json.Esc(Config.NormalisePriority(_policy.Limits.Priority))),
+                Json.P("working_set_mib", Json.Num(_policy.Limits.WorkingSetMib)),
+                Json.P("min_free_mib", Json.Num(_policy.Limits.MinFreeMib)))).Append(",");
             sb.Append(Json.P("overriding", overriding ? "true" : "false")).Append(",");
             sb.Append(Json.P("mode", Json.Esc(Mode.ToString()))).Append(",");
             sb.Append(Json.P("seconds_until_available",
@@ -1438,11 +1454,23 @@ namespace IdleGpu
                 _queues.TryGetValue(d.Id, out q);
                 ServiceStatus st = Install.Status(d, false);
                 st.DiskBytes = CachedDiskBytes(d);
+                // AVAILABLE, PER SERVICE, ALREADY RESOLVED. A GPU service is
+                // gated by the GPU detector; a CPU service is gated only by the
+                // limits matrix, and putting the two behind one boolean was what
+                // made a CPU speech job wait out a ninety second cooldown for a
+                // card it never touched. Memory is in it too, because a runner
+                // that will not start a 6.5 GiB job on a full machine should say
+                // so rather than accepting the work and sitting on it.
+                bool serviceCan = (d.WantsGpu ? can && _policy.Limits.Gpu : _policy.CanRunCpu(Mode));
+                string memWhy;
+                if (serviceCan && !MemoryAllows(d, _policy.Limits, out memWhy)) serviceCan = false;
+                else memWhy = "";
                 sb.Append(Install.Json(d, st,
                     registered && j.Running,
                     q == null ? 0 : q.QueuedCount(),
                     q == null ? null : q.Manifest(_c.MaxPassthroughBytes),
-                    d.YieldGraceSeconds > 0 ? d.YieldGraceSeconds : _c.YieldGraceSeconds));
+                    d.YieldGraceSeconds > 0 ? d.YieldGraceSeconds : _c.YieldGraceSeconds,
+                    d.WantsGpu ? "gpu" : "cpu", serviceCan, memWhy));
             }
             sb.Append("]}");
             return sb.ToString();

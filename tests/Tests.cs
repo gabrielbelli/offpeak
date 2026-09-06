@@ -614,8 +614,28 @@ namespace IdleGpu
                 Ok(json.Contains("\"ready\":false"), "ready is false");
                 Ok(json.Contains("\"not_ready_reason\":\"not_installed\""),
                     "and the reason names the service, not the GPU");
-                Ok(!json.Contains("gpu"),
-                    "no per-service block mentions the GPU at all; that is reported once, for the machine");
+                // CHANGED DELIBERATELY when the runner started selling the
+                // processor as well as the card. The old assertion was that a
+                // per-service block never says the word "gpu", which was the
+                // right rule while there was one resource and one answer: the
+                // machine's availability belonged at the top of the document and
+                // repeating it per service was how the two got conflated.
+                //
+                // With two resources a service must say WHICH ONE it wants, or
+                // the client is left to guess from the manifest, and it must
+                // carry its OWN availability, already resolved against the right
+                // gate, or a CPU service reads as busy whenever a game is on the
+                // card it never touches. The rule the old test protected is kept
+                // and asserted below: the MACHINE-wide gpu_available is still
+                // reported once, at the top, and never inside a service.
+                Ok(json.Contains("\"device\":\"gpu\""),
+                    "the block says which resource this service is after");
+                Ok(json.Contains("\"available\":null"),
+                    "and, with no agent to ask, says it does not know whether the machine is "
+                    + "free rather than guessing false");
+                Ok(!json.Contains("gpu_available"),
+                    "but the machine-wide answer is still reported once, for the machine, "
+                    + "and never repeated per service");
                 Ok(json.Contains("\"size_hint\":\"about 6.3 GB\""),
                     "and the cost is published before anything is fetched");
             }
