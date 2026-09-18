@@ -1429,6 +1429,17 @@ namespace IdleGpu
                     Json.P("own_session", Json.Num(s.Session.OwnSessionId)),
                     Json.P("console_session", Json.Num(s.Session.ConsoleSessionId)),
                     Json.P("in_console_session", s.Session.RunningInConsoleSession ? "true" : "false"),
+                    // THE THREE FIELDS THE BLIND VETO IS DECIDED ON, none of
+                    // which used to be published. `state: blocked` with the
+                    // reason "cannot observe the user" was therefore impossible
+                    // to diagnose from outside the machine: an owner could not
+                    // tell a helper that had never started from one whose report
+                    // had just expired, and neither could the server that had
+                    // stopped sending it work. Diagnosing it once cost a remote
+                    // login. See Policy.Evaluate's tier 0.
+                    Json.P("has_console_user", s.Session.HasConsoleUser ? "true" : "false"),
+                    Json.P("console_user", Json.Esc(s.Session.ConsoleUserName)),
+                    Json.P("presence_fresh", s.Session.PresenceFresh ? "true" : "false"),
                     Json.P("locked", s.Session.Locked ? "true" : "false"),
                     Json.P("input_idle_seconds", Json.Num(s.Session.InputIdleSeconds)),
                     Json.P("foreground_process", Json.Esc(s.Session.ForegroundProcess)),

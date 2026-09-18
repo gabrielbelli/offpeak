@@ -76,6 +76,105 @@ job object kills you outright. Pick it from your worst-case uninterruptible span
 not your average one, and declare that span in the manifest as `unit_seconds` so
 clients can reason about it.
 
+**`manifest()["id"]` must be the section id, and the way to be sure is to read it
+from `IDLEGPU_SERVICE_ID`.** The agent sets that variable for every service it
+launches. Nothing reconciles the two ids: the outer one comes from
+`[service.<id>]` and the manifest is spliced in verbatim under it, on purpose,
+because the manifest is your document. A controller copied to make a second
+variant, with the first one's id left in, publishes
+
+```json
+{"id": "sd-turbo", "installed": true, "manifest": {"id": "sd"}}
+```
+
+and every layer is satisfied while anything routing on the manifest id hands back
+the wrong model. `idlegpu service list` reports the disagreement when it can see
+a published manifest, but the fix is to not have a literal there at all.
+
+### Two services out of one tree
+
+Two sections may name the same `InstallDir` on purpose: a second checkpoint for a
+model family already installed is its weights and nothing else, not another copy
+of torch. `[service.chatterbox]` and `[service.chatterbox-turbo]` do exactly this
+and the second one costs 3.8 GB instead of 8.8.
+
+```ini
+InstallDir  = %RUNTIME%\chatterbox
+ReadyMarker = %INSTALL%\.installed-turbo
+```
+
+Both fields expand the placeholders, and `ReadyMarker` expands *after*
+`InstallDir` so `%INSTALL%` there is the tree you just named. (`%INSTALL%` inside
+`InstallDir` itself is left literal — it is the name of the value being computed,
+and a path with a `%` in it fails loudly at install rather than silently
+provisioning into another service's directory.)
+
+**A distinct marker is what keeps the two installable and removable on their
+own.** Share the marker as well and you are declaring they are the same download,
+which is right for `chatterbox` and `chatterbox-cpu` — one is the other run on
+the processor — and wrong for two different sets of weights.
+
+Two consequences, and the tooling handles both rather than leaving them to be
+discovered:
+
+* `idlegpu service cost` measures a **directory**, so every sharer reports the
+  whole tree. Each row is true; the sum is not. The total counts a tree once and
+  the listing names who shares each one.
+* `idlegpu service remove` on a shared tree clears **only that service's own ready
+  marker** and leaves the directory, because deleting it would take the other
+  service's weights, the shared virtual environment and its `python.exe` — and
+  leave that service `Enabled = true` pointing at an interpreter that is gone.
+  `--purge` deletes the tree and refuses until every sharer has been removed. The
+  refusal is symmetric, so removal order is never a trap.
+
+**Provision once, per engine.** One provisioning script with a switch beats two
+scripts: `provision.ps1 -Engine turbo` fetches different weights and writes a
+different marker, and everything above that step is shared and idempotent, so the
+two can be installed in either order. Write the marker as the script's **last**
+act either way.
+
+### When a shared tree is impossible: two versions of the same package
+
+**One tree is one virtual environment, and that is not configurable.**
+`Install.ContainedEnvironment` sets `UV_PROJECT_ENVIRONMENT` to
+`<InstallDir>\venv` (`src/Install.cs:325`) with no per-service override, so two
+sections naming the same `InstallDir` share one `venv`. Sharing is therefore
+right when the second service needs different **weights**, and impossible when it
+needs different **packages**.
+
+`[service.voxtral]` is the second case. `chatterbox-tts` hard-pins
+`torch==2.6.0`; the Voxtral int4 path needs `torch==2.14.0` for torchao's
+`TILE_PACKED_TO_4D` packing. So it gets its own `InstallDir`, its own CPython
+(about 60 MiB duplicated) and its own 4.6 GB of torch, and its `SizeHint` says
+the **whole** 12.2 GB rather than an incremental figure that would be a saving
+nobody gets.
+
+The test for which case you are in is one question: *would `uv sync` against my
+`pyproject.toml` produce the same environment the other service already has?* If
+no, name a different `InstallDir` and say the real number in `SizeHint`. A shared
+tree that cannot resolve fails at `uv sync`, halfway through provisioning, having
+already downloaded several gigabytes.
+
+### When your controller needs an interpreter flag
+
+There is no per-service environment key in `worker.ini` on purpose: adding one
+would mean recompiling the agent to add a service, which is the one thing this
+design promises never to need. Put the flag in `Arguments`, before the script:
+
+```ini
+Arguments = "-X" "utf8" "%SCRIPTS%\voxtral\controller.py" --queue "%QUEUE%"
+```
+
+`-X utf8` is `PYTHONUTF8=1` as an argument, and for `voxtral` it is load-bearing:
+the third-party wrapper opens a 14.9 MB tokeniser file with no `encoding=`, so
+Windows uses cp1252 and it dies inside `json.load`. **Assert the flag at the top
+of your controller** rather than trusting a line of INI to survive editing —
+`voxtral/controller.py` exits with that sentence if `sys.flags.utf8_mode` is
+false, which turns a stack trace four frames deep in a dependency into one line.
+
+`Arguments` is read as **one line**. The INI parser has no continuation
+character, so a `^` or a trailing backslash is part of the value.
+
 ### 2. The provisioning script
 
 A PowerShell script called with `-Root <the service's own directory>`.
@@ -232,6 +331,8 @@ idlegpu mode Off                     # does it yield? this is the same code path
 idlegpu status --json                # last_yield_ms, last_yield_was_kill
 idlegpu mode Auto                    # does the job resume rather than fail?
 idlegpu service remove sd            # is all the disk given back?
+idlegpu service remove sd --purge    # ...and if it shares a tree, is it refused
+                                     #    until every sharer is gone?
 ```
 
 `last_yield_was_kill: true` means your controller ignored `YIELD` and the job

@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Speech synthesis on the GPU. The one real service, and the proof the contract works.
 
+TWO CHECKPOINTS, ONE FILE, SELECTED WITH --engine. `multilingual` is Chatterbox
+in 23 languages with expression controls; `turbo` is Chatterbox Turbo, English
+only with no expression controls at all, and 2.36x quicker on an RTX 3070. What
+differs between them is a row in ENGINES below and nothing else: no branch in the
+queue loop, in the yield check, in the thread retune or in speak(). See the
+comment on ENGINES for why the missing controls are refused by name rather than
+accepted and dropped.
+
 THIS IS THE ONLY FILE IN THE REPOSITORY THAT IMPORTS TORCH, and that is the
 point. Nothing in the agent, the listener, the scheduler or the queue knows what
 audio is. The words "voice", "text" and "sample rate" appear here and nowhere in
@@ -45,7 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import idlegpu_service as svc                                   # noqa: E402
 
-# 24000 is the multilingual Chatterbox model's own output rate, read from the
+# 24000 is what both checkpoints produce - they share S3GEN_SR - read from the
 # model at load time below rather than assumed. This constant is only the value
 # published in the manifest before the model has been loaded once.
 DEFAULT_SAMPLE_RATE = 24000
@@ -96,11 +104,143 @@ def _rss_mib():
         return 0
 
 
-def manifest(sample_rate, device, unit_seconds, vram_mib, rss_mib=0):
-    return {
-        "id": "chatterbox",
+# WHICH CHECKPOINT, AND WHAT IT CANNOT DO.
+#
+# ONE CONTROLLER, TWO ENGINES, AND NO SECOND FILE. tts_turbo.py ships inside the
+# same chatterbox-tts wheel as mtl_tts.py, so a fork would be two copies of the
+# queue plumbing, the yield check, the thread retune and the timing sidecar, kept
+# in step by hand, to change an import and a keyword argument list.
+#
+# WHAT IS PER ENGINE IS DATA, NOT BRANCHES. Everything that differs between the
+# two lives in this table: the class to import, the parameters generate() will
+# actually honour, and how long a segment takes. speak() reads the table; nothing
+# below asks "am I turbo".
+#
+# CONTROLS IS THE IMPORTANT COLUMN, and it is not a preference. Turbo's
+# generate() ACCEPTS exaggeration and cfg_weight and then discards them with a
+# logged warning, because the checkpoint sets hp.emotion_adv = False so the
+# conditioning layer is never built and inference_turbo has no
+# classifier-free-guidance path at all. It has no language_id parameter of any
+# kind, so passing one is a TypeError rather than a fallback to English. A
+# parameter that is accepted and dropped is a client believing something false
+# about the audio it just received, so this file refuses by name what it cannot
+# honour and passes nothing it was not asked for.
+ENGINES = {
+    "multilingual": {
+        "id_suffix": "",
+        "import": ("chatterbox.mtl_tts", "ChatterboxMultilingualTTS"),
         "description": "Chatterbox multilingual text to speech, one segment per unit of work",
         "labels": ["speech", "tts", "chatterbox", "audio"],
+        # Everything generate() honours, and the default this controller uses when
+        # the client does not say. `language` maps to the language_id argument.
+        "controls": {
+            "language": ("language_id", "en"),
+            "exaggeration": ("exaggeration", 0.5),
+            "cfg_weight": ("cfg_weight", 0.5),
+            "temperature": ("temperature", 0.8),
+        },
+        # A deliberately conservative starting value per device, corrected upwards
+        # the first time a real segment takes longer. Understating it is the
+        # dangerous direction: unit_seconds is the floor on how long after a polite
+        # request the machine can still be busy.
+        "unit_seconds": {"cuda": 8.0, "cpu": 60.0},
+        "min_reference_seconds": 0.0,
+        # STRICT IS OFF HERE, AND THAT IS NOT A DOUBLE STANDARD - see the note on
+        # turbo below. This service has been deployed for months against a client
+        # that sends `sample_rate`, which this schema has never declared. Turning
+        # strictness on for it today would fail every job in production to close a
+        # hole that has never been exploited. The schema is corrected below so that
+        # flipping this is one word whenever somebody wants to.
+        "strict_params": False,
+    },
+    "turbo": {
+        "id_suffix": "-turbo",
+        "import": ("chatterbox.tts_turbo", "ChatterboxTurboTTS"),
+        "description": "Chatterbox Turbo text to speech, English only, one segment per unit of work",
+        "labels": ["speech", "tts", "chatterbox", "turbo", "audio"],
+        # NO language, NO exaggeration, NO cfg_weight. Not omitted for brevity:
+        # generate() cannot honour any of the three, and the whole point of this
+        # table is that what it cannot honour it never receives.
+        "controls": {
+            "temperature": ("temperature", 0.8),
+        },
+        # 2.36x baseline measured on an RTX 3070, so a segment on the card takes
+        # well under baseline's 8.0 - but this seeds a CEILING that is only ever
+        # corrected UPWARDS, so it is set from the measured ratio rounded up rather
+        # than from optimism. The CPU figure stays at baseline's 60.0 because turbo
+        # on a processor has never been measured at all, and inventing a smaller
+        # number for it would understate the floor to every client until the first
+        # segment corrected it.
+        "unit_seconds": {"cuda": 4.0, "cpu": 60.0},
+        # Turbo asserts this itself inside prepare_conditionals, so a shorter clip
+        # fails the job. Published so a client can refuse before submitting.
+        "min_reference_seconds": 5.0,
+        # ON, AND IT IS THE ONLY DEFENCE THAT SURVIVES A VERSION SKEW. This runner
+        # is a separate program on somebody's desktop and can be pointed at by an
+        # older server that still sends exaggeration, cfg_weight and language to
+        # every speech service it knows. Refusing at the far end of the wire is
+        # what stops that server being told "fine" and handed audio that ignored
+        # three of the four things it asked for.
+        "strict_params": True,
+    },
+}
+
+
+def service_id(engine):
+    """This service's id, from the agent, never a literal.
+
+    THE DEFECT THIS PREVENTS, and it is the single most likely copy-paste in the
+    whole exercise. Nothing reconciles the id in worker.ini with the id inside
+    the manifest a controller publishes: the agent splices the manifest in
+    verbatim under a key it labels with the section id. A controller copied to
+    make a second engine, with "chatterbox" left in its manifest, publishes
+        {"id":"chatterbox-turbo", ..., "manifest":{"id":"chatterbox"}}
+    and every layer is satisfied. Anything routing on the manifest id - which is
+    the id the CONTROLLER believes it is - then hands back the other engine, and
+    the only symptom is audio in the wrong voice at the wrong speed.
+
+    IDLEGPU_SERVICE_ID is set by the agent for every service it launches, so the
+    id can only be wrong if worker.ini is wrong, which is one place instead of
+    two. The fallback is for running this by hand outside the agent.
+    """
+    from_agent = os.getenv("IDLEGPU_SERVICE_ID", "").strip()
+    if from_agent:
+        return from_agent
+    return "chatterbox" + ENGINES[engine]["id_suffix"]
+
+
+def params_schema(engine):
+    """Exactly the keys this engine honours, and nothing else.
+
+    This is what `strict_params` is checked against, so a key described here is a
+    key that reaches generate() and a key missing from here is one the job is
+    refused for.
+    """
+    spec = ENGINES[engine]
+    schema = {
+        "segments": "list of strings, ALREADY SEGMENTED by the client; each one is one unit of work",
+        "reference_sha256": "optional, a voice reference clip previously uploaded to POST /v1/assets",
+        # DECLARED, NOT IGNORED. The client sends the rate it is going to assemble
+        # the artefacts at; this controller checks it against the model's own rate
+        # and fails the job when they disagree, rather than returning samples at a
+        # rate nobody asked for. `outputs` in the manifest is the authority.
+        "sample_rate": "optional, must match the rate in `outputs`; the job is refused if it does not",
+    }
+    # The prose for a control that is not a number, keyed by the wire name. Every
+    # other control describes itself from its default.
+    described = {"language": "language id understood by the model, default %s"}
+    for name, (_arg, default) in sorted(spec["controls"].items()):
+        schema[name] = described.get(name, "number, default %s") % (default,)
+    return schema
+
+
+def manifest(engine, sample_rate, device, unit_seconds, vram_mib, rss_mib=0):
+    spec = ENGINES[engine]
+    return {
+        "id": service_id(engine),
+        "engine": engine,
+        "description": spec["description"],
+        "labels": list(spec["labels"]),
         "control": "queue",
         # Between segments and no finer, because generate() cannot be interrupted
         # from outside. Saying "checkpoint" here would be a lie that costs
@@ -115,14 +255,12 @@ def manifest(sample_rate, device, unit_seconds, vram_mib, rss_mib=0):
         "outputs": "audio/pcm-f32@%d" % sample_rate,
         "checkpointable": False,
         "device": device,
-        "params_schema": {
-            "segments": "list of strings, ALREADY SEGMENTED by the client; each one is one unit of work",
-            "language": "language id understood by the model, default en",
-            "reference_sha256": "optional, a voice reference clip previously uploaded to POST /v1/assets",
-            "exaggeration": "number, default 0.5",
-            "cfg_weight": "number, default 0.5",
-            "temperature": "number, default 0.8",
-        },
+        # THE HONEST SURFACE, PUBLISHED RATHER THAN DOCUMENTED. A client reading
+        # this can tell before submitting that this engine has no language and no
+        # expression controls, instead of finding out by receiving English.
+        "params_schema": params_schema(engine),
+        "min_reference_seconds": spec["min_reference_seconds"],
+        "refuses_undeclared_params": spec["strict_params"],
         "artefacts": {
             "<job>.<n>.f32": "raw little-endian float32 PCM for segment n, at the rate in `outputs`",
             "<job>.timings.json": "per segment compute time, sample count and realtime factor",
@@ -133,13 +271,15 @@ def manifest(sample_rate, device, unit_seconds, vram_mib, rss_mib=0):
 class Runtime:
     """Loads the model once, then answers segments until told to stop."""
 
-    def __init__(self, device="cuda"):
+    def __init__(self, device="cuda", engine="multilingual"):
         # "auto" is the honest default for a runner that now sells both. It uses
         # the card when there is one and the CPU when there is not, and either way
         # the manifest says which, so a client can see what it is being given.
         # Naming a device that is not there used to be a SystemExit; it is now a
         # decision the machine makes and reports.
         self.device = device
+        self.engine = engine
+        self.spec = ENGINES[engine]
         self.resolved = device
         self.model = None
         self.sample_rate = DEFAULT_SAMPLE_RATE
@@ -152,8 +292,11 @@ class Runtime:
 
     def load(self):
         t0 = time.monotonic()
+        import importlib
         import torch
-        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+        module_name, class_name = self.spec["import"]
+        model_class = getattr(importlib.import_module(module_name), class_name)
 
         if self.device == "auto":
             self.resolved = "cuda" if torch.cuda.is_available() else "cpu"
@@ -222,7 +365,8 @@ class Runtime:
 
         svc.log("loading model", torch=torch.__version__, cuda=torch.version.cuda,
                 device=torch.cuda.get_device_name(0) if self.resolved == "cuda" else "cpu")
-        self.model = ChatterboxMultilingualTTS.from_pretrained(device=self.resolved)
+        self.model = model_class.from_pretrained(device=self.resolved)
+        self._assert_runtime(model_class)
         self.load_seconds = time.monotonic() - t0
         self.sample_rate = int(getattr(self.model, "sr", DEFAULT_SAMPLE_RATE))
 
@@ -241,6 +385,62 @@ class Runtime:
         # finishes anything.
         svc.log("model ready", load_seconds=round(self.load_seconds, 3),
                 vram_used_mib=self.vram_mib, sample_rate=self.sample_rate)
+
+    def _assert_runtime(self, model_class):
+        """WHAT THE INSTALLED PACKAGE ACTUALLY DOES, checked against what this
+        file claims about it, once, at load.
+
+        THE DEFECT THIS PREVENTS is the table above going quietly out of date. A
+        chatterbox-tts point release that gives turbo a language_id parameter, or
+        a rebuilt checkpoint where hp.emotion_adv is True, would not break
+        anything visibly: this controller would go on refusing a control the
+        model had grown, or - far worse in the other direction - go on PASSING a
+        control the model had lost, which generate() would accept and discard.
+        Failing the whole process here costs one loud restart. Not checking costs
+        one job at a time, silently, for as long as nobody listens closely.
+        """
+        import inspect
+
+        try:
+            takes = set(inspect.signature(model_class.generate).parameters)
+        except (TypeError, ValueError):        # a C extension or a decorator
+            svc.log("could not inspect generate(); the capability table is unchecked",
+                    engine=self.engine)
+            return
+
+        declared = set(arg for _name, (arg, _default) in self.spec["controls"].items())
+        missing = sorted(declared - takes)
+        if missing:
+            raise SystemExit(
+                "FATAL: this build of %s.generate() does not take %s, but the engine "
+                "table for '%s' says it does. Passing it would raise TypeError on "
+                "every job. The installed chatterbox-tts is not the one this "
+                "controller was written against."
+                % (model_class.__name__, ", ".join(missing), self.engine))
+
+        # THE OTHER DIRECTION, AND IT IS A WARNING RATHER THAN FATAL. A parameter
+        # generate() grew that this table does not offer is a capability going
+        # unsold, not a wrong answer, so it must not stop a machine that is
+        # working. It is said out loud because the alternative is finding out a
+        # year later.
+        interesting = {"language_id", "exaggeration", "cfg_weight"}
+        gained = sorted((interesting & takes) - declared)
+        if gained:
+            svc.log("this build of the model takes parameters this engine does not offer; "
+                    "the engine table may be out of date",
+                    engine=self.engine, parameters=gained)
+
+        # hp.emotion_adv is the flag that decides whether the emotion conditioning
+        # layer is built at all, and it is what makes exaggeration structurally
+        # absent from turbo rather than merely unused.
+        hp = getattr(getattr(self.model, "t3", None), "hp", None)
+        emotion = getattr(hp, "emotion_adv", None)
+        if emotion is not None:
+            offers = "exaggeration" in self.spec["controls"]
+            if bool(emotion) != offers:
+                svc.log("the checkpoint disagrees with the engine table about expression",
+                        engine=self.engine, emotion_adv=bool(emotion),
+                        offers_exaggeration=offers)
 
     def _retune(self):
         """Take the agent's latest thread count, BETWEEN units of work.
@@ -270,17 +470,21 @@ class Runtime:
             svc.log("could not change the thread count", error=str(exc))
 
     def speak(self, text, params):
-        import numpy as np
         self._retune()
+
+        # BUILT FROM THE TABLE, SO A KEY THIS ENGINE CANNOT HONOUR CANNOT BE
+        # TYPED HERE. Turbo receives no language_id, no exaggeration and no
+        # cfg_weight - not None for them, ABSENT - because generate() would
+        # accept two of the three and throw them away, and raise TypeError on the
+        # third. There is no `if engine == "turbo"` anywhere in this method, and
+        # a third engine is a row in ENGINES rather than a branch.
+        kwargs = {"audio_prompt_path": params.get("_reference_path") or None}
+        for name, (arg, default) in self.spec["controls"].items():
+            value = params.get(name)
+            kwargs[arg] = default if value is None else value
+
         t0 = time.monotonic()
-        wav = self.model.generate(
-            text,
-            language_id=params.get("language", "en"),
-            audio_prompt_path=params.get("_reference_path") or None,
-            exaggeration=params.get("exaggeration", 0.5),
-            cfg_weight=params.get("cfg_weight", 0.5),
-            temperature=params.get("temperature", 0.8),
-        )
+        wav = self.model.generate(text, **kwargs)
         compute = time.monotonic() - t0
         audio = wav.squeeze().detach().cpu().numpy().astype("<f4")
         return audio, compute
@@ -295,8 +499,10 @@ class FakeRuntime:
     downloads several gigabytes, and re-run afterwards whenever that path changes.
     """
 
-    def __init__(self, segment_seconds=3.0):
+    def __init__(self, segment_seconds=3.0, engine="multilingual"):
         self.device = "fake"
+        self.engine = engine
+        self.spec = ENGINES[engine]
         self.sample_rate = DEFAULT_SAMPLE_RATE
         self.load_seconds = None
         self.vram_mib = 0
@@ -321,9 +527,53 @@ class FakeRuntime:
         return array.array("f", (0.0 for _ in range(n))), compute
 
 
+def check_params(rt, params):
+    """Refuse, by name, anything this engine cannot honour.
+
+    THE LAST LINE OF DEFENCE, AND THE ONLY ONE THAT SURVIVES A VERSION SKEW.
+    The server that submits these jobs runs somewhere else, is upgraded on its
+    own schedule and can be older than this file. An older server sends
+    exaggeration, cfg_weight and language to every speech service it knows
+    about, because until turbo existed every speech service honoured all three.
+
+    If this controller quietly ignored them, that server would be told the job
+    succeeded and would hand its caller English audio with none of the delivery
+    it asked for, with no error anywhere in the stack. Refusing here turns a
+    silent wrong answer into a failed job with a sentence in it, and a failed
+    job is something somebody fixes.
+
+    Named rather than counted: "unsupported parameter 'exaggeration'" says which
+    field and which engine, so the fix is obvious from the message alone.
+    """
+    schema = params_schema(rt.engine)
+    if rt.spec["strict_params"]:
+        for name in sorted(params):
+            # A leading underscore is this controller's own working state - the
+            # resolved reference path - and never came off the wire.
+            if name.startswith("_") or name in schema:
+                continue
+            raise ValueError(
+                "unsupported parameter %r: %s has no such control. It honours: %s."
+                % (name, service_id(rt.engine), ", ".join(sorted(schema))))
+
+    # DECLARED MEANS CHECKED. sample_rate is in every engine's schema, so a
+    # client that names a rate this model does not produce is told so rather than
+    # handed samples at a different rate and left to assemble them wrongly.
+    want = params.get("sample_rate")
+    if want is not None and int(want) != int(rt.sample_rate):
+        raise ValueError(
+            "sample_rate %s was asked for and this model produces %d; the rate is a "
+            "property of the checkpoint and cannot be changed here. See `outputs` in "
+            "the manifest." % (want, rt.sample_rate))
+
+
 def build_handler(rt, service_ref):
     def handle(job):
         params = job.params
+        # BEFORE ANY WORK. A job that is going to be refused must be refused
+        # while its client is still holding the submit, not after two minutes on
+        # a card somebody wanted back.
+        check_params(rt, params)
         segments = params.get("segments")
         if not isinstance(segments, list) or not segments:
             raise ValueError("params.segments must be a non-empty list of strings")
@@ -385,6 +635,10 @@ def main():
     ap.add_argument("--queue", required=True, help="the service's queue directory")
     ap.add_argument("--device", default="auto",
                     help="cuda, cpu, or auto (default): use the card if there is one")
+    ap.add_argument("--engine", default="multilingual", choices=sorted(ENGINES),
+                    help="which checkpoint: multilingual (23 languages, expression "
+                         "controls) or turbo (English only, no expression, 2.36x "
+                         "quicker on a 3070)")
     ap.add_argument("--once", action="store_true", help="drain the queue and exit")
     ap.add_argument("--no-stdin-watch", action="store_true",
                     help="for running by hand, where stdin is a terminal")
@@ -396,7 +650,8 @@ def main():
                     help="exit after this long with nothing to do, so another service can run")
     args = ap.parse_args()
 
-    rt = FakeRuntime(args.segment_seconds) if args.fake_model else Runtime(args.device)
+    rt = (FakeRuntime(args.segment_seconds, args.engine) if args.fake_model
+          else Runtime(args.device, args.engine))
     # Loading before publishing means the manifest can carry MEASURED numbers -
     # the model's own sample rate and the VRAM it actually took - instead of
     # guesses. A capability advertisement that was never checked against the
@@ -412,11 +667,15 @@ def main():
     resolved = getattr(rt, "resolved", rt.device)
     if args.fake_model:
         unit = args.segment_seconds
-    elif resolved == "cpu":
-        unit = 60.0
     else:
-        unit = 8.0
-    m = manifest(rt.sample_rate, resolved, unit, rt.vram_mib, getattr(rt, "rss_mib", 0))
+        # PER ENGINE AND PER DEVICE, from the table. A turbo run seeded with
+        # baseline's number overstates the floor to every client until the first
+        # segment; a CPU run seeded with the card's number understates it, which
+        # is the direction that costs somebody their game.
+        seeds = ENGINES[args.engine]["unit_seconds"]
+        unit = seeds["cpu"] if resolved == "cpu" else seeds["cuda"]
+    m = manifest(args.engine, rt.sample_rate, resolved, unit, rt.vram_mib,
+                 getattr(rt, "rss_mib", 0))
     m["unit_seconds_source"] = "unverified default until a segment has been timed"
     ref = [None]
     service = svc.Service(args.queue, m, build_handler(rt, ref),

@@ -34,7 +34,34 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "compile failed" }
 
     & $exe (Join-Path $here "fixtures")
-    exit $LASTEXITCODE
+    $rc = $LASTEXITCODE
+
+    # A SECOND BINARY, NOT A SECOND HARNESS. SharedTreeTests.cs links the same
+    # sources and has its own Main, because two suites cannot share one entry
+    # point. It is separate from Tests.cs so that work on the shared-install path
+    # and work on the policy path cannot collide in one file - a merge conflict in
+    # a test file is the cheapest possible way to lose a test nobody notices has
+    # gone.
+    $exe2 = Join-Path $out "sharedtree.exe"
+    $src2 = @(
+        (Join-Path $root "src\Model.cs"),
+        (Join-Path $root "src\Config.cs"),
+        (Join-Path $root "src\Policy.cs"),
+        (Join-Path $root "src\Replay.cs"),
+        (Join-Path $root "src\Jobs.cs"),
+        (Join-Path $root "src\Http.cs"),
+        (Join-Path $root "src\Install.cs"),
+        (Join-Path $here "SharedTreeTests.cs")
+    )
+    & $csc /nologo /target:exe /platform:anycpu /warnaserror+ /out:$exe2 $src2
+    if ($LASTEXITCODE -ne 0) { throw "compile failed (SharedTreeTests)" }
+
+    Write-Output ""
+    Write-Output "=== two services, one install directory ==="
+    & $exe2 (Join-Path $here "fixtures")
+    if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+
+    exit $rc
 }
 finally {
     Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue

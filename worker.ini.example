@@ -346,7 +346,7 @@ limits.busy.admit               = no
 # [service.<id>]  what this runner can do
 # =====================================================================
 #
-# NOTHING BELOW IS INSTALLED. Both sections ship with Enabled = false, and the
+# NOTHING BELOW IS INSTALLED. Every section below ships with Enabled = false, and the
 # agent will not fetch, launch or even create a queue directory for a service
 # that is not opted in. A base install is one 120 KB executable that downloads
 # nothing; a machine whose owner never asks for speech never sees a byte of torch.
@@ -396,8 +396,15 @@ Labels               = speech,tts,audio
 YieldGraceSeconds    = 2
 SizeHint             = about 8.1 GB (5.0 GB of torch cu126 and friends, 3.0 GB of weights)
 Provision            = chatterbox\provision.ps1
-Command              = %RUNTIME%\chatterbox\venv\Scripts\python.exe
-Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%"
+ProvisionArguments   = -Engine multilingual
+Command              = %INSTALL%\venv\Scripts\python.exe
+Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%" --engine multilingual
+# THE TREE, NAMED RATHER THAN DEFAULTED, because two other sections point at this
+# same one and a default that only one of them can spell is a default that will be
+# changed here and forgotten there. %RUNTIME%\chatterbox is also what this would
+# have defaulted to, so writing it changes nothing on an existing install.
+InstallDir           = %RUNTIME%\chatterbox
+ReadyMarker          = %INSTALL%\.installed
 # Which gate the scheduler puts this behind: gpu waits for the GPU detector, cpu
 # waits only for the limits matrix. A CPU service used to sit out a ninety second
 # cooldown caused by a game on a card it never touched.
@@ -425,10 +432,21 @@ NeedsMemoryMib       = 6144
 #     CUDA context to tear down
 #   the client already selects by service id, so nothing is invented for it
 #
-# NO SECOND VENV AND NO EXTRA DISK. The CUDA torch wheels already contain the
-# complete CPU backend, so this runs out of the same 8.2 GB runtime\chatterbox
-# venv that [service.chatterbox] provisioned. If you enable this one and not the
-# GPU one, provisioning still runs once and installs the same thing.
+# NO SECOND VENV AND NO EXTRA DISK, AND NOW THE FILE ACTUALLY SAYS SO. The CUDA
+# torch wheels already contain the complete CPU backend, so this runs out of the
+# same runtime\chatterbox tree that [service.chatterbox] provisioned. If you
+# enable this one and not the GPU one, provisioning still runs once and installs
+# the same thing.
+#
+# THAT CLAIM USED TO BE FALSE, and it is worth knowing why, because it is the
+# reason InstallDir and ReadyMarker are written out below. Only Command,
+# Arguments and WorkingDir expanded %RUNTIME%, so InstallDir DEFAULTED to
+# runtime\chatterbox-cpu while Command pointed into runtime\chatterbox. The
+# comment promised a shared tree; the code provisioned a second complete 8 GB
+# one beside it, looked for a marker in a directory the shared provisioning
+# never wrote to, and reported "not installed" for ever. Config.Resolve now
+# expands both fields, so the sharing the comment always described is the
+# sharing that happens.
 #
 # WHEN THIS IS WORTH ENABLING. Measured on a Ryzen 7 5700X3D: see docs/CPU-
 # LIMITS.md for the realtime factor and what it does to the machine while it
@@ -448,12 +466,19 @@ Labels               = speech,tts,audio,cpu
 YieldGraceSeconds    = 6
 SizeHint             = nothing extra; shares the chatterbox runtime
 Provision            = chatterbox\provision.ps1
-Command              = %RUNTIME%\chatterbox\venv\Scripts\python.exe
+ProvisionArguments   = -Engine multilingual
+Command              = %INSTALL%\venv\Scripts\python.exe
 # --device cpu BY NAME, not auto. On a machine with a card, auto would resolve to
 # cuda and this service would quietly become a second GPU service competing with
 # the first.
-Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%" --device cpu
+Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%" --engine multilingual --device cpu
 Device               = cpu
+# THE SAME TREE AND THE SAME MARKER AS [service.chatterbox]. Same weights, same
+# venv, same download - so "installed" is one fact about one tree and not two,
+# and installing either one installs both. `idlegpu service remove` knows they
+# share and will not delete the tree out from under the other; see Install.cs.
+InstallDir           = %RUNTIME%\chatterbox
+ReadyMarker          = %INSTALL%\.installed
 # THE PEAK, NOT THE STEADY STATE, and the difference is the whole reason this
 # number exists. Measured on a Ryzen 7 5700X3D with 31.9 GiB, sampling every
 # three seconds through one real synthesis on the CPU:
@@ -472,6 +497,242 @@ Device               = cpu
 # The admission check adds this to the row's MinFreeMib, so during light use this
 # service needs 6144 + 7168 = 13,312 MiB free before it will start.
 NeedsMemoryMib       = 7168
+
+# THE SAME SPEECH ENGINE FAMILY, THE OTHER CHECKPOINT. Chatterbox Turbo.
+#
+# WHAT YOU GET AND WHAT YOU GIVE UP, measured on an RTX 3070 8 GB by this project
+# on this hardware, and none of it is a vendor claim:
+#
+#   chatterbox        0.65x realtime      4,199 MiB VRAM     23 languages
+#   chatterbox-turbo  1.54x realtime      3,805 MiB VRAM     English only
+#
+# 2.36 times quicker, past realtime, and less VRAM. The bill is paid in controls:
+#
+#   NO LANGUAGE. generate() has no language_id parameter at all. Passing one is a
+#     TypeError, not a fallback. It speaks English.
+#   NO EXAGGERATION AND NO CFG_WEIGHT. The checkpoint sets hp.emotion_adv = False,
+#     so the emotion conditioning layer is never built, and inference_turbo has no
+#     classifier-free-guidance path. Both arguments are still ACCEPTED by
+#     generate() and then logged as a warning and discarded, which is worse than
+#     refusing them. This controller refuses them by name; see --engine turbo.
+#   QUIETER BY DESIGN. Output is normalised to -27 LUFS.
+#   A REFERENCE CLIP MUST BE LONGER THAN 5 SECONDS. Turbo asserts it itself, so a
+#     shorter one fails the job rather than producing something odd.
+#
+# temperature, top_p, top_k and repetition_penalty survive and mean what they
+# always meant.
+[service.chatterbox-turbo]
+Enabled              = false
+Description          = Chatterbox Turbo: English only, no expression controls, 2.36x baseline on a 3070
+Labels               = speech,tts,audio,turbo
+Device               = gpu
+# BELOW chatterbox's 10, ON PURPOSE. There is one controller per device group and
+# no preemption, so when both have queued work the higher number takes the card
+# and the other waits. Baseline serves 23 languages and two expression controls
+# that have NO substitute anywhere; turbo's only missing piece is speed, and a
+# caller who cannot have the card still gets turbo on a processor. The engine with
+# the worse fallback wins the scarce resource.
+#
+# Reversing this starves baseline off the card under a steady turbo trickle, and
+# every starved baseline job then reports machine_busy - THE SAME STRING A GAME
+# PRODUCES - so a week of turbo hogging is indistinguishable from a week of
+# gaming, by anyone reading either end.
+Priority             = 9
+# The same 2 s as [service.chatterbox], and for the same reason: what the grace
+# period buys on a GPU service is tearing down the CUDA context, and turbo has
+# exactly the same one. It is NOT time to finish the segment in flight - a turbo
+# segment is 2.36x quicker than a baseline segment, so if 2 s is right there it is
+# more than right here. A longer grace on a faster engine is somebody's game
+# waiting for nothing.
+YieldGraceSeconds    = 2
+# MEASURED FROM THE REPOSITORY, not from the model card. from_pretrained fetches
+# ResembleAI/chatterbox-turbo with allow_patterns *.safetensors *.json *.txt *.pt
+# *.model, which is 3.77 GiB across ten files:
+#
+#   t3_turbo_v1.safetensors     1,827 MiB   the turbo T3
+#   s3gen_meanflow.safetensors  1,016 MiB   the vocoder turbo actually loads
+#   s3gen.safetensors           1,008 MiB   fetched by the pattern, never loaded
+#   ve.safetensors + tokenizer      7 MiB
+#
+# AND IT IS THE INCREMENTAL COST, not the total. torch cu126, CUDA, the CPython
+# and the whole 5 GB virtual environment are already there from
+# [service.chatterbox] and are SHARED - see InstallDir below. Installing this
+# after that one costs 3.8 GB, not 12.
+SizeHint             = about 3.8 GB of extra weights (the 5 GB torch runtime is shared with chatterbox)
+# THE SAME 6144 AS [service.chatterbox], and the number is SYSTEM memory for the
+# admission check, not VRAM. Turbo needs less VRAM than baseline - 3,805 MiB
+# against 4,199 - but that is the card, and this row decides whether starting the
+# job would push the OWNER's machine into paging. Turbo's resident set has never
+# been measured separately and its weights are the same order as baseline's, so
+# this is baseline's measured figure until somebody measures this one. Sizing it
+# down from a VRAM reading would admit a job on a full machine on the strength of
+# a number about a different resource, and paging is felt in a way a slow job is
+# not. The controller publishes the measured memory_mib in its manifest, which is
+# what corrects this rather than a guess here.
+NeedsMemoryMib       = 6144
+Provision            = chatterbox\provision.ps1
+ProvisionArguments   = -Engine turbo
+Command              = %INSTALL%\venv\Scripts\python.exe
+# --idle-exit-seconds 240, NOT the default 60. A controller exits when it has been
+# idle for a while so another service can have the card, and that is right. But
+# turbo's cold load is 67.5 s against 20.0 s warm; a 60 s idle window in front of
+# a 68 s reload is a card that spends more time loading than speaking. 240 is
+# still short against the length of a real idle evening.
+Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%" --engine turbo --idle-exit-seconds 240
+# SHARES [service.chatterbox]'s TREE ON PURPOSE, and this is where the 3.8 GB
+# above comes from. tts_turbo.py is already inside the installed chatterbox-tts
+# 0.1.7 wheel - same package, same venv, same torch - so the only new bytes are
+# the turbo checkpoint. A tree of its own would be 8.8 GB instead of 3.8 GB for
+# one different set of weights.
+#
+# TWO CONSEQUENCES OF SHARING, WRITTEN DOWN HERE RATHER THAN DISCOVERED LATER:
+#
+#   `service cost` measures a DIRECTORY, so this row and chatterbox's row both
+#     report the whole shared tree. Both figures are true; adding them is not, so
+#     the total counts each tree once and the list says which rows share one.
+#   `service remove` on either one would delete the other's weights, the shared
+#     virtual environment and its python.exe, leaving that service Enabled = true
+#     pointing at an interpreter that is gone. So removal is guarded: removing
+#     either clears only its OWN ready marker and leaves the tree, and --purge
+#     refuses until every service sharing the tree has been removed.
+InstallDir           = %RUNTIME%\chatterbox
+# A DISTINCT MARKER INSIDE A SHARED TREE, and it is what keeps the two install
+# states separable. chatterbox-cpu shares chatterbox's marker because it is
+# genuinely the same download; turbo's weights are a different Hugging Face
+# repository sharing no blobs with it, so it can be installed and removed on its
+# own. provision.ps1 -Engine turbo writes this file as its LAST act.
+ReadyMarker          = %INSTALL%\.installed-turbo
+
+# A THIRD SPEECH ENGINE, AND THE FIRST ONE THAT IS NOT CHATTERBOX AT ALL.
+# Voxtral-4B-TTS, Mistral's checkpoint, run at int4 through the third-party
+# voxtral-int4 wrapper (torchao tinygemm with the HQQ parameter search).
+#
+# WHAT YOU GET AND WHAT YOU PAY, measured on an RTX 3070 8 GB by this project on
+# this hardware, and none of it is a vendor claim:
+#
+#   chatterbox        0.635x realtime    4,199 MiB VRAM    23 languages, cloning
+#   chatterbox-turbo  1.594x realtime    3,805 MiB VRAM    English only, cloning
+#   voxtral           0.104x realtime    3,500 MiB VRAM     9 languages, 20 voices
+#
+# 0.104x IS THE HEADLINE AND IT IS NOT A TYPO. A twenty-second clip is about
+# three and a half minutes of GPU. That is at the quality settings below; at the
+# wrapper's own default of 8 flow steps it is 0.354x, still slower than
+# realtime. So this is never a synchronous route and never streamed - a client
+# submits a job and comes back for it.
+#
+# WHAT IT CANNOT DO, and all of it is refused BY NAME rather than ignored:
+#
+#   NO CLONING. Twenty speaker embeddings ship inside the checkpoint as .pt
+#     tensors and there is no speaker encoder anywhere in it. A reference clip
+#     cannot become a voice here even in part, so `voice` is REQUIRED and
+#     `reference_sha256` is refused.
+#   NO EXAGGERATION, NO CFG_WEIGHT, NO TEMPERATURE. It is a flow-matching
+#     checkpoint with no emotion conditioning of any kind. Its delivery dials
+#     are cfg_alpha and flow_steps, which are neither of those on another scale.
+#   NO LANGUAGE PARAMETER. The language is carried by the voice embedding:
+#     de_female is German because of which tensor it is. A language field could
+#     only agree with the voice or contradict it.
+#
+# TWENTY VOICES, NINE LANGUAGES: ar_male, casual_female, casual_male,
+# cheerful_female, de_female, de_male, es_female, es_male, fr_female, fr_male,
+# hi_female, hi_male, it_female, it_male, neutral_female, neutral_male,
+# nl_female, nl_male, pt_female, pt_male. The controller reads them off the disk
+# rather than carrying a list, and publishes them in its manifest, so nothing
+# here or on any client needs a second copy.
+[service.voxtral]
+Enabled              = false
+Description          = Voxtral-4B-TTS int4: twenty fixed preset voices, nine languages, 0.104x realtime
+Labels               = speech,tts,audio,preset-voice
+Device               = gpu
+# BELOW BOTH CHATTERBOX ENGINES. There is one controller per device group and no
+# preemption, so when several have queued work the higher number takes the card
+# and the others wait. This is the slowest engine on the machine by a factor of
+# six and the one whose jobs are longest, so a Voxtral queue that outranked
+# chatterbox would hold the card for hours while every cloning job waited - and a
+# starved job reports machine_busy, THE SAME STRING A GAME PRODUCES, so a week of
+# that is indistinguishable from a week of gaming by anyone reading either end.
+Priority             = 7
+# The same 2 s as the other GPU services, and for the same reason: what the grace
+# period buys on a GPU service is tearing down the CUDA context, which this has
+# exactly as much of as they do. It is NOT time to finish the work in flight -
+# the controller checks the yield flag between FRAMES, about every 740 ms, so it
+# stops on its own well inside two seconds. A longer grace here would be
+# somebody's game waiting for nothing.
+YieldGraceSeconds    = 2
+# ABOUT 12.2 GB, NONE OF IT SHARED, and the honesty matters more here than
+# anywhere else in this file. 7.49 GB of weights, 4.59 GB of a SECOND torch, and
+# its own 0.06 GB CPython. It cannot share [service.chatterbox]'s tree:
+# chatterbox-tts 0.1.7 pins torch==2.6.0 and this needs 2.14.0, and
+# src/Install.cs:325 makes one tree one virtual environment with no per-service
+# override. Quoting an incremental figure the way chatterbox-turbo does would be
+# quoting a saving that does not exist. Peak during the install is about
+# 16.7 GB, before the wheel cache is reclaimed.
+#
+# IT IS AN UPPER BOUND MEASURED ON A REAL TREE, not an estimate: the environment
+# those 4.59 GB came from is the one the audio was measured on and it held 68
+# packages, where the lock resolves 35. `idlegpu service cost` measures yours.
+SizeHint             = up to 12.2 GB, none of it shared (7.5 GB of weights, 4.6 GB of a second torch cu126)
+# SYSTEM memory for the admission check, not VRAM. The load reads 8.0 GB of BF16
+# off disk and holds it while it quantises, so the resident peak is the BF16
+# model plus torch itself. Rounded up from that, because a machine that starts
+# paging is felt in a way a slow job is not, and the controller republishes the
+# measured figure in its manifest as soon as it has one.
+NeedsMemoryMib       = 10240
+Provision            = voxtral\provision.ps1
+Command              = %INSTALL%\venv\Scripts\python.exe
+# -X utf8 IS LOAD-BEARING AND IT IS NOT A STYLE CHOICE. voxtral-int4's
+# generate.py opens tekken.json with no encoding=, so Windows uses cp1252 and
+# the tokeniser dies on a file that is 14.9 MB of base64 and Unicode - measured,
+# both ways, on this machine. There is no per-service environment key in this
+# file and adding one would mean recompiling the agent to add a service, which
+# is the one thing this design promises never to need. -X utf8 is PYTHONUTF8=1
+# as an argument. The controller asserts sys.flags.utf8_mode at start and exits
+# with that same sentence if this line is ever edited, so the failure is one
+# line rather than four frames deep inside tiktoken.
+#
+# --flow-steps 32 IS THE MAIN QUALITY KNOB AND IT WAS ARRIVED AT BY LISTENING.
+# 32 was clearly best on this owner's ear, 16 close behind, 8 and 4 audibly
+# worse. The wrapper defaults to 3 and its repository to 8. It is the difference
+# between three and a half minutes and one, and it is a taste decision rather
+# than a performance one - which is exactly why it is here and not in the code.
+# A job may send its own flow_steps; this is what it gets when it does not.
+#
+# --cfg-alpha 1.2 is full classifier-free guidance. 1.0 is documented upstream
+# as faster and garbled, which is why the floor is 1.0 and not 0.
+#
+# --group-size 32 against the shipped 64: finer quantisation, and it cost no
+# measurable VRAM. Consumed once inside the load, so it is not a job parameter.
+#
+# --max-frames 2000 is 160 seconds of audio per segment at 12.5 Hz. The
+# wrapper's fast path defaults to 500, a 40-second ceiling that silently
+# truncates a long sentence; the standard path uses 2000.
+#
+# --low-pass-hz 0 turns OFF the 6th-order Butterworth at 10 kHz that the
+# wrapper applies to every file. The owner heard it in one pass and called it a
+# pilot mic. Set it to 10000 to have it back.
+#
+# --fade-ms 120 is a squared fade-in over the start of every segment. There is a
+# known warm-up glitch in the first frames (HF discussion #20) and the wrapper's
+# own trim only catches a run of identical leading codes. DROPPING FRAMES
+# INSTEAD WAS TRIED AND IT ATE THE FIRST WORD; a fade buries the burst under an
+# amplitude envelope and every sample of speech survives.
+#
+# --min-free-vram-mib 8400 because the load PEAKS AT 8265 MiB ON AN 8192 MiB
+# CARD - it puts the whole model on the device in BF16 before quantising - and
+# it survived once with 455 MiB of desktop resident. Below this the controller
+# refuses the JOB, with both numbers in the message, rather than dying and being
+# relaunched every 500 ms for ever.
+#
+# --idle-exit-seconds 600, not the default 60. A controller exits when it has
+# been idle so another service can have the card, and that is right - but the
+# cold load here is 63 s, every time, because there is no pre-quantised
+# checkpoint. A one-minute window in front of a one-minute load is a card that
+# spends its evening loading.
+Arguments            = "-X" "utf8" "%SCRIPTS%\voxtral\controller.py" --queue "%QUEUE%" --group-size 32 --max-frames 2000 --flow-steps 32 --cfg-alpha 1.2 --fade-ms 120 --low-pass-hz 0 --min-free-vram-mib 8400 --idle-exit-seconds 600
+# ITS OWN TREE, AND IT IS FORCED RATHER THAN CHOSEN. See SizeHint: one tree is
+# one virtual environment and one virtual environment cannot hold two torches.
+InstallDir           = %RUNTIME%\voxtral
+ReadyMarker          = %INSTALL%\.installed
 
 # %RUNTIME%, %SCRIPTS% and %QUEUE% above are expanded by the agent, so this file
 # has no absolute path in it and works unedited on anybody's machine:

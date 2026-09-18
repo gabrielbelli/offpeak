@@ -366,16 +366,181 @@ namespace IdleGpu
 
         /// Delete everything the service downloaded. This is the whole of removal:
         /// one directory, because everything a service fetches was pointed into it.
+        ///
+        /// Kept for callers that know there is only one service. It cannot see the
+        /// rest of worker.ini, so it cannot notice a shared tree; prefer the
+        /// overload below anywhere the configuration is in hand.
         public static bool Remove(ServiceDef s, out string error)
         {
+            string ignored;
+            return Remove(s, new ServiceDef[] { s }, true, out error, out ignored);
+        }
+
+        /// Two services may point at ONE InstallDir on purpose. Two speech engines
+        /// out of one venv and one torch is 3.8 GiB of new weights (measured)
+        /// instead of a second 8.2 GiB tree, and sharing is the only way to say so.
+        ///
+        /// It also turns `service remove` into a loaded gun, which is why this
+        /// exists in the same commit as the sharing. Directory.Delete(InstallDir,
+        /// true) on EITHER of a sharing pair takes the other one's weights, its
+        /// venv and its python.exe with it, and leaves that other service
+        /// Enabled = true pointing at an interpreter that is no longer there. The
+        /// agent would then relaunch it every 500 ms for ever, loudly in logs\ and
+        /// invisibly everywhere else.
+        ///
+        /// So removal is SYMMETRIC and order cannot trap anybody:
+        ///   sharing, no --purge   clear only this service's own ReadyMarker and
+        ///                         disable it. The tree stays; say so, and say how
+        ///                         to reclaim it.
+        ///   sharing, --purge      refuse while any sharer is still installed. Once
+        ///                         every one of them has been removed, delete it.
+        ///   not sharing           today's behaviour, unchanged.
+        ///
+        /// `note` is what to tell the person; it is never an error.
+        public static bool Remove(ServiceDef s, IEnumerable<ServiceDef> all, bool purge,
+                                  out string error, out string note)
+        {
             error = null;
+            note = null;
+            if (s == null || string.IsNullOrEmpty(s.InstallDir)) return true;
+
+            List<ServiceDef> sharers = SharingInstallDir(s, all);
+            if (sharers.Count > 0 && !purge)
+            {
+                // ONLY OUR OWN MARKER, and only when it is ours alone. Two services
+                // that share a tree AND a marker share an install - chatterbox and
+                // chatterbox-cpu are the same six gigabytes and the same download -
+                // so deleting it would silently uninstall the other one too.
+                var alsoMarked = new List<string>();
+                foreach (ServiceDef other in sharers)
+                    if (SamePath(other.ReadyMarker, s.ReadyMarker)) alsoMarked.Add(other.Id);
+
+                var sb = new StringBuilder();
+                if (alsoMarked.Count > 0)
+                {
+                    sb.Append(s.Id + " shares its install AND its ready marker with " +
+                              string.Join(", ", alsoMarked.ToArray()) +
+                              ", so there is nothing of its own to delete: it is the same " +
+                              "download. It has been disabled and nothing was removed.");
+                }
+                else
+                {
+                    try { if (File.Exists(s.ReadyMarker)) File.Delete(s.ReadyMarker); }
+                    catch (Exception ex) { error = ex.Message; return false; }
+                    sb.Append(s.Id + " is no longer installed.");
+                }
+                sb.Append(" " + s.InstallDir + " was LEFT ALONE because ");
+                sb.Append(string.Join(", ", Ids(sharers)));
+                sb.Append(sharers.Count == 1 ? " installs into it too" : " install into it too");
+                sb.Append("; deleting it would take that service's weights, its virtual ");
+                sb.Append("environment and its interpreter with it.");
+                sb.Append(Environment.NewLine);
+                sb.Append("To reclaim the disk, remove every service that shares the tree ");
+                sb.Append("and then: idlegpu service remove " + s.Id + " --purge");
+                note = sb.ToString();
+                return true;
+            }
+
+            if (sharers.Count > 0)
+            {
+                var stillThere = new List<string>();
+                foreach (ServiceDef other in sharers)
+                    if (IsInstalled(other)) stillThere.Add(other.Id);
+                if (stillThere.Count > 0)
+                {
+                    error = "--purge would delete " + s.InstallDir + ", and " +
+                            string.Join(", ", stillThere.ToArray()) +
+                            (stillThere.Count == 1 ? " is still installed there." : " are still installed there.") +
+                            Environment.NewLine +
+                            "Remove " + (stillThere.Count == 1 ? "it" : "them") + " first: " +
+                            "idlegpu service remove " + stillThere[0];
+                    return false;
+                }
+            }
+
             try
             {
-                if (string.IsNullOrEmpty(s.InstallDir) || !Directory.Exists(s.InstallDir)) return true;
+                if (!Directory.Exists(s.InstallDir)) return true;
                 Directory.Delete(s.InstallDir, true);
                 return true;
             }
             catch (Exception ex) { error = ex.Message; return false; }
+        }
+
+        /// Every OTHER service installing into the same directory as this one.
+        public static List<ServiceDef> SharingInstallDir(ServiceDef s, IEnumerable<ServiceDef> all)
+        {
+            var found = new List<ServiceDef>();
+            if (s == null || all == null || string.IsNullOrEmpty(s.InstallDir)) return found;
+            foreach (ServiceDef other in all)
+            {
+                if (other == null || other.Id == s.Id) continue;
+                if (SamePath(other.InstallDir, s.InstallDir)) found.Add(other);
+            }
+            return found;
+        }
+
+        /// Do these two path strings name the same place? Compared after
+        /// normalisation, because %RUNTIME%\chatterbox and a trailing separator and
+        /// a different case are all the same directory to Windows and all different
+        /// strings to string.Equals.
+        public static bool SamePath(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            try
+            {
+                a = Path.GetFullPath(a).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                b = Path.GetFullPath(b).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+            catch (Exception)
+            {
+                // An unexpandable placeholder or an illegal character. Fall back to
+                // the literal comparison rather than claiming they differ: saying
+                // "these are different trees" wrongly is what deletes somebody's
+                // weights.
+            }
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// Just the ids, for a sentence naming who else is in a shared tree.
+        public static string[] Ids(List<ServiceDef> defs)
+        {
+            var outp = new List<string>();
+            foreach (ServiceDef d in defs) outp.Add(d.Id);
+            return outp.ToArray();
+        }
+
+        // -- the manifest a controller published about itself ----------------------
+
+        /// THE SINGLE MOST LIKELY COPY-PASTE, AND THE ONLY ONE THAT PRODUCES THE
+        /// WRONG AUDIO SILENTLY.
+        ///
+        /// Nothing reconciles the two ids in GET /v1/services: the outer one comes
+        /// from the [service.<id>] section and the inner one is spliced verbatim
+        /// out of whatever the controller published. A controller copied to make a
+        /// second engine, with its manifest id left as the first engine's, publishes
+        ///     {"id":"chatterbox-turbo", ..., "manifest":{"id":"chatterbox"}}
+        /// and every part of the stack is happy. The client asked for turbo, the
+        /// runner ran turbo, and anything routing on the manifest id - which is the
+        /// id the CONTROLLER believes it is - hands back the other engine.
+        ///
+        /// Returns the sentence to print, or null when they agree, when there is no
+        /// manifest yet, or when the manifest has no id at all. An older controller
+        /// that publishes no id is not a mismatch and must never be reported as one.
+        public static string ManifestIdMismatch(ServiceDef d, string manifestJson)
+        {
+            if (d == null) return null;
+            // Json.PeekString already reads one top level key out of a document
+            // without parsing it, skipping anything nested. That is exactly this
+            // job, so there is no second reader here to drift from it.
+            string got = IdleGpu.Json.PeekString(manifestJson, "id");
+            if (string.IsNullOrEmpty(got)) return null;
+            if (string.Equals(got, d.Id, StringComparison.Ordinal)) return null;
+            return "WARNING: " + d.Id + " publishes a manifest that calls itself '" + got +
+                   "'. The controller and worker.ini disagree about which service this is, " +
+                   "which is what a controller copied to make a second engine looks like " +
+                   "when its manifest id was not changed. Fix the controller's manifest, or " +
+                   "rename the [service." + got + "] section to match.";
         }
 
         // -- persisting the choice ------------------------------------------------

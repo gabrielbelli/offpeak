@@ -876,7 +876,32 @@ namespace IdleGpu
             {
                 if (string.IsNullOrEmpty(s.QueueDir)) s.QueueDir = Path.Combine(QueueRoot, s.Id);
                 if (s.YieldGraceSeconds <= 0) s.YieldGraceSeconds = YieldGraceSeconds;
+
+                // INSTALLDIR AND READYMARKER EXPAND TOO, AND THIS ORDER IS THE
+                // WHOLE OF IT. Until this existed, only Command, Arguments and
+                // WorkingDir expanded, so a service that wanted to SHARE another
+                // service's runtime tree - which is the difference between 1.8 GiB
+                // and 6.8 GiB when two engines run out of one venv - had no way to
+                // say so except an absolute path. An absolute path in a shipped
+                // example file is this machine's path, and it is wrong on every
+                // other machine: exactly the friction the block below describes,
+                // reintroduced through the one field that could not use the fix.
+                //
+                // %INSTALL% IS DELIBERATELY NOT AVAILABLE INSIDE INSTALLDIR. It is
+                // the name of the thing being computed, so honouring it there would
+                // resolve against whatever InstallDir happened to hold a moment
+                // earlier - empty on the first pass, and the PREVIOUS service's
+                // directory on a re-Resolve. Left literal instead, so a mistake
+                // shows up as a path with a % in it that fails loudly at install,
+                // rather than as a service quietly provisioning into somebody
+                // else's tree.
+                s.InstallDir = Expand(s.InstallDir, s, false);
                 if (string.IsNullOrEmpty(s.InstallDir)) s.InstallDir = Path.Combine(RuntimeRoot, s.Id);
+                // AFTER InstallDir is final, so %INSTALL% in a ReadyMarker means
+                // the tree this service actually installs into. That is what lets
+                // two services share one tree and still be separately installable:
+                // distinct markers inside a shared directory.
+                s.ReadyMarker = Expand(s.ReadyMarker, s, true);
                 if (string.IsNullOrEmpty(s.ReadyMarker)) s.ReadyMarker = Path.Combine(s.InstallDir, ".installed");
 
                 // THE DEFECT THIS PREVENTS: a shipped worker.ini.example that
@@ -895,13 +920,17 @@ namespace IdleGpu
             }
         }
 
-        string Expand(string v, ServiceDef s)
+        string Expand(string v, ServiceDef s) { return Expand(v, s, true); }
+
+        /// `install` is false only while InstallDir itself is being computed, where
+        /// %INSTALL% would name the value being produced. See Resolve().
+        string Expand(string v, ServiceDef s, bool install)
         {
             if (string.IsNullOrEmpty(v) || v.IndexOf('%') < 0) return v;
             v = v.Replace("%RUNTIME%", RuntimeRoot);
             v = v.Replace("%SCRIPTS%", ScriptsRoot);
             v = v.Replace("%QUEUE%", s.QueueDir);
-            v = v.Replace("%INSTALL%", s.InstallDir);
+            if (install) v = v.Replace("%INSTALL%", s.InstallDir);
             v = v.Replace("%DATA%", DataDir);
             return v;
         }

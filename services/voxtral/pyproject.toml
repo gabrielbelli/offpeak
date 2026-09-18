@@ -1,0 +1,92 @@
+# The Voxtral runtime, and it is a SECOND torch on the same machine.
+#
+# WHY THIS CANNOT SHARE [service.chatterbox]'s TREE, which is the first question
+# anybody sensible asks when they see 4.6 GB of torch land beside 5.0 GB of
+# torch. chatterbox-tts 0.1.7 hard-pins torch==2.6.0. Voxtral's int4 path needs
+# torchao's TILE_PACKED_TO_4D int4 packing with the HQQ parameter search, which
+# does not exist in a torch that old: the measured, working install is
+# torch 2.14.0+cu126. One virtual environment cannot hold both, and
+# src/Install.cs:325 derives UV_PROJECT_ENVIRONMENT from InstallDir with no
+# per-service override, so two services sharing a tree share one venv. Hence its
+# own InstallDir, its own venv, and the honest 12.2 GB in the section's SizeHint
+# rather than an incremental figure that would be a lie.
+#
+# PIN WHAT WAS MEASURED, NOT THE FLOOR. The wrapper's README says torch 2.11+.
+# Every number this service publishes - 0.104x realtime, 3.5-3.7 GB resident,
+# 63 s to load, and the audio the owner chose flow_steps=32 by listening to -
+# came off the environment below, on an RTX 3070, resolved on CPython 3.12.14.
+# A floor pin would let a stranger's machine resolve a different torch and then
+# blame this project for a different sound.
+#
+# WHY 3.12 AND NOT SOMETHING NEWER: nothing here pins Python at all, so this is
+# not forced the way chatterbox's is. It is 3.12.14 because that is the
+# interpreter the measurements were taken on, and because the runner already
+# fetches exactly that build for chatterbox, so uv reuses the download.
+
+[project]
+name = "idlegpu-voxtral"
+version = "0.1.0"
+description = "Voxtral-4B-TTS int4, as a child process that can be killed at any moment"
+requires-python = "==3.12.*"
+dependencies = [
+    # torch is a DIRECT dependency and that is not a style point. uv only honours
+    # a [tool.uv.sources] mapping for a package the project itself depends on, so
+    # a transitive torch resolves from pypi.org - and the PyPI win_amd64 wheel is
+    # the CPU-ONLY build. That is the single most common way this setup fails,
+    # and it fails silently: everything imports, everything runs, and the card is
+    # never touched. See the same comment in services/chatterbox/pyproject.toml,
+    # where it was learned the expensive way.
+    "torch==2.14.0",
+    # The int4 quantiser itself. load_model_int4 asks torchao for
+    # Int4WeightOnlyConfig with int4_packing_format = TILE_PACKED_TO_4D and
+    # int4_choose_qparams_algorithm = HQQ; both names are recent enough that a
+    # range here would resolve to a torchao that raises AttributeError at load.
+    "torchao==0.18.0",
+    "safetensors==0.8.0",
+    "numpy==2.5.3",
+    # UNDECLARED BY THE WRAPPER'S README, AND IT IMPORTS BOTH AT MODULE SCOPE.
+    # audio_postprocess.py does `from scipy.signal import butter, sosfilt,
+    # resample_poly`; generate.py's TekkenTokenizer does `import tiktoken`.
+    # Following the README's install list produces an environment that dies on
+    # the first import, after the 7.5 GB download.
+    "scipy==1.18.1",
+    "tiktoken==0.14.0",
+    "soundfile==0.14.0",
+    # PINNED DOWNWARDS ON PURPOSE, and it is the only pin here that is not simply
+    # "what was measured". An unpinned setuptools resolves to 84.0.0, which no
+    # longer CONTAINS pkg_resources - it was deprecated through the 8x series and
+    # then removed. Nothing in this tree is known to import it, but this project
+    # has already lost a 6 GB install to exactly that removal (see the setuptools
+    # comment in services/chatterbox/pyproject.toml, four frames deep in a
+    # watermarker), and 78.1.0 is what the measured environment had. The cost of
+    # being wrong in this direction is nothing; the cost in the other direction
+    # is a failure that surfaces nowhere near its cause.
+    "setuptools==78.1.0",
+    # Measured. Left unpinned it drifts to 3.32.6, which is almost certainly
+    # fine and is still not the environment the audio came out of.
+    "filelock==3.32.3",
+    # provision.ps1 calls snapshot_download() from Python rather than shelling
+    # out to huggingface-cli, because that command NO LONGER EXISTS in hub 1.x -
+    # `huggingface_hub.commands` was removed and the shell-out dies with
+    # ModuleNotFoundError. Measured, in download.log on the test machine.
+    "huggingface-hub==1.31.0",
+]
+
+[tool.uv]
+# Resolve for Windows only. This runs on one gaming PC, the torch cu126 wheels
+# are win_amd64, and narrowing the resolution is what lets the lock be generated
+# and checked from any machine - which is how the one beside this file was made.
+environments = ["sys_platform == 'win32'"]
+
+# Never build anything from source on somebody's gaming PC. It would want a
+# compiler the machine does not have, and finding that out 8 GB into a download
+# is the worst possible moment.
+no-build = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

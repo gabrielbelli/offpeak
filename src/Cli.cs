@@ -39,7 +39,7 @@ namespace IdleGpu
             string host = null, fingerprint = null, key = null, keyFile = null;
             string body = null, bodyFile = null, idem = null, outFile = null, artefact = null;
             int port = 0, intervalMs = 1000, timeoutSeconds = 0;
-            bool raw = false, wait = false;
+            bool raw = false, wait = false, purge = false;
 
             bool afterDashDash = false;
             for (int i = 0; i < args.Length; i++)
@@ -49,6 +49,10 @@ namespace IdleGpu
                 if (a == "--") { afterDashDash = true; continue; }
                 if (a == "--json") { raw = true; continue; }
                 if (a == "--wait") { wait = true; continue; }
+                // `service remove --purge` only. Named rather than positional
+                // because it is the one flag in this program that deletes several
+                // gigabytes somebody waited twenty minutes for.
+                if (a == "--purge") { purge = true; continue; }
                 if (a == "--host" && i + 1 < args.Length) { host = args[++i]; continue; }
                 if (a == "--port" && i + 1 < args.Length) { port = int.Parse(args[++i], CultureInfo.InvariantCulture); continue; }
                 if (a == "--fingerprint" && i + 1 < args.Length) { fingerprint = args[++i]; continue; }
@@ -95,7 +99,7 @@ namespace IdleGpu
             // run), and starting a multi-gigabyte download is not a thing anything
             // reachable over a socket should be able to do to somebody's gaming PC.
             // The listener reports these states; only a person changes them.
-            if (verb == "service") return Service(pos, cfg, raw);
+            if (verb == "service") return Service(pos, cfg, raw, purge);
 
             var client = new RunnerClient();
             // NEVER cfg.Bind. 0.0.0.0 is where a listener ACCEPTS, not an address
@@ -536,7 +540,7 @@ namespace IdleGpu
 
         // -- the opt-in surface ---------------------------------------------------
 
-        static int Service(List<string> pos, Config cfg, bool raw)
+        static int Service(List<string> pos, Config cfg, bool raw, bool purge)
         {
             string what = pos.Count > 1 ? pos[1].ToLowerInvariant() : "list";
             if (what == "list" || what == "cost") return ServiceList(cfg, what == "cost", raw);
@@ -565,7 +569,7 @@ namespace IdleGpu
                 case "install": return ServiceInstall(d, cfg);
                 case "enable": return ServiceEnable(d, cfg, true);
                 case "disable": return ServiceEnable(d, cfg, false);
-                case "remove": return ServiceRemove(d, cfg);
+                case "remove": return ServiceRemove(d, cfg, purge);
                 default:
                     Console.Error.WriteLine("unknown: idlegpu service " + what);
                     Console.Error.WriteLine("try: list, cost, install, enable, disable, remove");
@@ -606,23 +610,48 @@ namespace IdleGpu
             }
 
             long total = 0;
+            // ONE TREE IS COUNTED ONCE. DiskBytes measures the DIRECTORY, so two
+            // services sharing an InstallDir - which is how a second speech engine
+            // costs 1.8 GiB of weights instead of a second 6.8 GiB torch - each
+            // report the full size of the tree they share. Both rows are true; the
+            // sum of them is not, and a total that says 13 GB when the drive lost 7
+            // is worse than no total at all.
+            var counted = new List<string>();
+            var warnings = new List<string>();
             Console.WriteLine("id                state         disk        what it costs to install");
             Console.WriteLine("----------------- ------------- ----------- ------------------------");
             foreach (ServiceDef d in cfg.Services)
             {
                 ServiceStatus st = Install.Status(d, measureDisk);
-                if (st.DiskBytes > 0) total += st.DiskBytes;
+                bool already = false;
+                foreach (string seen in counted) if (Install.SamePath(seen, d.InstallDir)) { already = true; break; }
+                if (st.DiskBytes > 0 && !already) { total += st.DiskBytes; counted.Add(d.InstallDir); }
                 // The three states as one word each, because the point of keeping
                 // them apart is that a person can see at a glance which of them is
                 // theirs to change.
                 string state = !st.Installed ? "known" : (st.Enabled ? "ready" : "installed");
+                // "(installed)" alone would let somebody read a shared 6.8 GiB tree
+                // as this service's own and delete it expecting to get it back.
+                List<ServiceDef> sharers = Install.SharingInstallDir(d, cfg.Services);
+                string what = st.Installed
+                    ? (sharers.Count > 0
+                        ? "(installed; shares this tree with " + string.Join(", ", Install.Ids(sharers)) + ")"
+                        : "(installed)")
+                    : (string.IsNullOrEmpty(d.SizeHint) ? "nothing to fetch" : d.SizeHint);
                 Console.WriteLine(
                     Pad(d.Id, 17) + " " + Pad(state, 13) + " " +
-                    Pad(st.DiskBytes < 0 ? "-" : Install.Human(st.DiskBytes), 11) + " " +
-                    (st.Installed ? "(installed)"
-                     : (string.IsNullOrEmpty(d.SizeHint) ? "nothing to fetch" : d.SizeHint)));
+                    Pad(st.DiskBytes < 0 ? "-" : Install.Human(st.DiskBytes), 11) + " " + what);
+                warnings.Add(Install.ManifestIdMismatch(
+                    d, JobStore.ReadJsonBlob(Path.Combine(d.QueueDir, "service.json"),
+                                             cfg.MaxPassthroughBytes)));
             }
             Console.WriteLine();
+            // AFTER the table, so it is the last thing on the screen rather than a
+            // line lost in the middle of one. A manifest whose id is not this
+            // service's id is a controller that thinks it is a different engine,
+            // and nothing else in the stack will ever say so.
+            foreach (string w in warnings)
+                if (!string.IsNullOrEmpty(w)) { Console.WriteLine(w); Console.WriteLine(); }
             if (measureDisk)
             {
                 Console.WriteLine("services on disk: " + Install.Human(total) +
@@ -693,24 +722,28 @@ namespace IdleGpu
             return 0;
         }
 
-        static int ServiceRemove(ServiceDef d, Config cfg)
+        static int ServiceRemove(ServiceDef d, Config cfg, bool purge)
         {
             long had = Install.DiskBytes(d);
+            bool shared = Install.SharingInstallDir(d, cfg.Services).Count > 0;
             if (had == 0 && !Install.IsInstalled(d))
             {
                 Console.WriteLine(d.Id + " has nothing installed; nothing to reclaim.");
                 return 0;
             }
-            string err;
-            if (!Install.Remove(d, out err))
+            string err, note;
+            if (!Install.Remove(d, cfg.Services, purge, out err, out note))
             {
-                // Almost always a file the running controller still has open. Saying
-                // which fix applies is cheaper than making somebody guess.
+                // Almost always a file the running controller still has open, or a
+                // tree another service is still installed into. Saying which fix
+                // applies is cheaper than making somebody guess.
                 Console.Error.WriteLine("could not remove " + d.InstallDir + ": " + err);
-                Console.Error.WriteLine("if the agent is running, stop it first: a controller holds files open.");
+                if (!shared)
+                    Console.Error.WriteLine("if the agent is running, stop it first: a controller holds files open.");
                 return 1;
             }
-            Console.WriteLine("removed " + d.InstallDir + ", reclaiming " + Install.Human(had));
+            if (note != null) Console.WriteLine(note);
+            else Console.WriteLine("removed " + d.InstallDir + ", reclaiming " + Install.Human(had));
             string e2;
             Install.SetEnabled(cfg.ConfigPath, d.Id, false, out e2);
             Console.WriteLine(d.Id + " is now disabled; its [service." + d.Id + "] section is still in worker.ini,");
@@ -736,6 +769,7 @@ namespace IdleGpu
             Console.WriteLine("  idlegpu service install <id>       fetch it into the contained directory, then enable it");
             Console.WriteLine("  idlegpu service disable <id>       stop running it; keep it on disk");
             Console.WriteLine("  idlegpu service remove <id>        delete it and reclaim the disk");
+            Console.WriteLine("  idlegpu service remove <id> --purge  also delete a tree shared with another service");
             Console.WriteLine();
             Console.WriteLine("client:");
             Console.WriteLine("  idlegpu status                     what the runner thinks is going on");

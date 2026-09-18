@@ -269,9 +269,28 @@ namespace IdleGpu
                 //
                 // This is the state a service lives in from boot until somebody
                 // signs in, and it is most of a gaming PC's uptime.
-                v.Reasons.Add(s.Session.HasConsoleUser
-                    ? "the desktop is locked, so nobody is at the machine"
-                    : "nobody is signed in at this machine");
+                // THREE STATES, NOT TWO, AND THE THIRD ONE IS THE COMMON ONE.
+                //
+                // This said "the desktop is locked" whenever a console user
+                // existed, without ever consulting Locked. A boot agent is
+                // permanently outside the console session, so that string was
+                // published on EVERY verdict it reached this branch with --
+                // including, measured on spring 2026-09-09, a session that was
+                // signed in, unlocked, idle for 930 s and correctly classified
+                // Idle. `status` read "the desktop is locked, so nobody is at
+                // the machine" beside `"locked": false` in its own JSON.
+                //
+                // Nothing behaved wrongly. The REPORT was wrong, which is worse
+                // in one specific way: it is the only thing an owner can read,
+                // and it says this agent works only while the screen is locked.
+                // The reason a verdict gives has to be a fact about the verdict.
+                v.Reasons.Add(!s.Session.HasConsoleUser
+                    ? "nobody is signed in at this machine"
+                    : s.Session.Locked
+                        ? "the desktop is locked, so nobody is at the machine"
+                        : "the logon helper is reporting, so this agent can see "
+                          + s.Session.ConsoleUserName + " from session "
+                          + s.Session.OwnSessionId.ToString(CultureInfo.InvariantCulture));
             }
 
             // --- TIER 1: vetoes. A game EXISTS. -------------------------------

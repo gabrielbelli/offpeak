@@ -44,6 +44,7 @@ namespace IdleGpu
             Session0RefusesForEverAndSaysWhyItCannotTell();
             Session0WithNobodySignedInIsAllowedToWork();
             Session0WithALockedDesktopIsAllowedToWork();
+            Session0SaysWhyItCanSeeTheUserRatherThanInventingALock();
             OurOwnJobIsNotSomebodyElseUsingTheGpu();
             SteamVetoesBeforeTheGpuMoves();
             PausedGameIsCaughtByVramAlone();
@@ -1094,6 +1095,46 @@ namespace IdleGpu
         }
 
         static DateTime T0 = new DateTime(2026, 9, 6, 12, 0, 0, DateTimeKind.Utc);
+
+        /// THE DEFECT THIS PREVENTS: a verdict that reports a fact about the
+        /// machine which is not true of the machine.
+        ///
+        /// The reason string said "the desktop is locked" whenever a console
+        /// user existed, without ever consulting Locked. A boot agent is
+        /// permanently outside the console session, so it published that on
+        /// every verdict where somebody was signed in -- measured on spring
+        /// 2026-09-09 beside its own JSON reading "locked": false, with the
+        /// session idle for 930 s and correctly classified Idle.
+        ///
+        /// Nothing behaved wrongly, and that is what made it worth a test: the
+        /// reason is the only thing an owner reads, and it said this agent
+        /// works only while the screen is locked. A server watching that string
+        /// would conclude the same.
+        static void Session0SaysWhyItCanSeeTheUserRatherThanInventingALock()
+        {
+            Case("session 0 with the helper reporting does not claim a lock");
+            var p = new Policy(new Config());
+            // Signed in, NOT locked, outside the console session, and the logon
+            // helper is fresh: exactly the deployed shape.
+            Verdict v = p.Evaluate(Sn(true, false, false, true, 930, T0));
+            Ok(!v.ReasonText.Contains("locked"),
+                "the reason does not claim a lock that is not there: " + v.ReasonText);
+            Ok(v.ReasonText.Contains("helper"),
+                "it says the helper is what makes the user visible: " + v.ReasonText);
+            Ok(!v.Blind, "and it is not blind: the helper is reporting");
+            Ok(v.MachineState == MachineState.Idle,
+                "930 s of no input is Idle (got " + v.MachineState + ")");
+
+            // The genuinely locked case must keep saying so.
+            Verdict locked = p.Evaluate(Sn(true, true, false, true, 5, T0.AddSeconds(1)));
+            Ok(locked.ReasonText.Contains("locked"),
+                "a real lock is still named: " + locked.ReasonText);
+
+            // And nobody signed in must still say nobody.
+            Verdict nobody = p.Evaluate(Sn(false, false, false, false, -1, T0.AddSeconds(2)));
+            Ok(nobody.ReasonText.Contains("nobody is signed in"),
+                "the sign-in screen is still named: " + nobody.ReasonText);
+        }
 
         /// The owner's own stated default, and the one that makes the hard half of
         /// the problem go away: when nobody is at the machine there is nobody to

@@ -105,10 +105,30 @@ namespace IdleGpu
 
             var rest = new List<string>();
             string mode = "--tray";
+            // ONCE A CLIENT VERB HAS BEEN SEEN, EVERY LATER FLAG IS THE CLIENT'S.
+            //
+            // MEASURED ON SPRING, and it is the same defect as the comment below
+            // arriving from the other side. `idlegpu --config worker.ini service
+            // remove chatterbox --purge` used to read --purge as an AGENT MODE,
+            // because this loop took any -- word whatever came before it. Mode was
+            // then not --tray, so the client-verb check below could not fire, no
+            // mode below matched, and the process fell all the way through and
+            // STARTED THE TRAY - a command that hangs for ever with no output, on
+            // a desktop nobody is looking at.
+            //
+            // Every client flag added from now on would have done the same thing,
+            // silently, which is why this is fixed here rather than by teaching
+            // the loop the name of one more flag.
+            bool sawVerb = false;
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--config" && i + 1 < args.Length) { i++; continue; }
-                if (args[i].StartsWith("--") && mode == "--tray" && args[i] != "--tray") { mode = args[i]; continue; }
+                if (!sawVerb && args[i].StartsWith("--") && mode == "--tray" && args[i] != "--tray")
+                {
+                    mode = args[i];
+                    continue;
+                }
+                if (!args[i].StartsWith("-")) sawVerb = true;
                 rest.Add(args[i]);
             }
 

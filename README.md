@@ -389,6 +389,11 @@ idlegpu service disable chatterbox   # stop running it, keep it on disk
 idlegpu service remove chatterbox    # delete it and reclaim the disk
 ```
 
+Where two services share one install directory - a second checkpoint for a model
+family that is already there - removing either leaves the tree alone and clears
+only its own ready marker. `idlegpu service remove <id> --purge` deletes the tree,
+and refuses until every service sharing it has been removed.
+
 ### Three states, never conflated
 
 This distinction is the reason the API exists in the shape it does.
@@ -433,6 +438,39 @@ Per service, only if you install it:
 |---|---|---|
 | `echo` | **21.5 MiB** | an embeddable CPython 3.12.10 and nothing else |
 | `chatterbox` | **8.17 GiB** | 5.01 GB of torch cu126 and its dependencies, 2.99 GB of model weights, 0.06 GB of CPython |
+| `chatterbox-cpu` | **nothing extra** | the same tree, run on the processor. The CUDA torch wheels already contain the complete CPU backend |
+| `chatterbox-turbo` | **3.77 GiB** | Chatterbox Turbo's weights, and only those. It shares chatterbox's tree - the same virtual environment, the same torch, the same CPython - because `tts_turbo.py` ships inside the wheel that is already there |
+| `voxtral` | **up to 12.16 GiB** | Voxtral-4B-TTS at int4, and NONE of it is shared. 7.49 GiB of weights, up to 4.59 GiB of a **second** torch cu126, and its own CPython. `chatterbox-tts` pins `torch==2.6.0` and this needs `2.14.0`, so the two cannot live in one virtual environment - and one install directory is one virtual environment |
+
+> **`chatterbox-turbo`'s figure is the INCREMENTAL one and it is measured from the
+> repository, not from a model card.** `from_pretrained` fetches
+> `ResembleAI/chatterbox-turbo` filtered to `*.safetensors *.json *.txt *.pt
+> *.model`: ten files, 3.77 GiB, of which the turbo T3 is 1.78 GiB and the
+> meanflow vocoder 0.99 GiB. Quoting 8.17 GiB again would be quoting somebody
+> else's download back at them; quoting only the T3 checkpoint would be quoting a
+> third of what their drive is about to lose.
+>
+> Sharing a tree makes two ordinary commands dangerous, so both are guarded rather
+> than documented: `service cost` counts a shared tree **once** in its total and
+> names who shares it, and `service remove` leaves the tree standing and clears
+> only that service's own ready marker. `--purge` deletes it and refuses until
+> every sharer has been removed, in either order.
+
+> **`voxtral`'s figure is the opposite kind of number, and it is quoted as the
+> whole thing on purpose.** It shares nothing, so this is both the total and the
+> incremental cost, and removing it gives all of it back. Measured on the test
+> install: 7.486 GiB of weights, 4.593 GiB of virtual environment, and the
+> wrapper itself is 3 MB. **An upper bound, not an estimate:** that environment
+> was the one the audio was measured on and it held 68 packages; the lock beside
+> `services/voxtral/pyproject.toml` resolves 35, having dropped a librosa tree
+> nothing in the import path touches. So the finished tree is that size or
+> smaller, and `idlegpu service cost` measures the real one. It passes about
+> 16.7 GB during the install, before the wheel cache is reclaimed.
+>
+> The duplicated CPython - about 60 MiB against 12 GiB - is the correct trade and
+> is stated rather than engineered around. `UV_PROJECT_ENVIRONMENT` is derived
+> from `InstallDir` with no per-service override, so sharing a tree would mean
+> sharing a `venv`, and one `venv` cannot hold two torches.
 
 > The chatterbox install lands at 13.1 GB and then reclaims 5.0 GB of downloaded
 > wheels before it declares itself finished, because a wheel cache on somebody's
@@ -883,7 +921,12 @@ src/            the agent. C# 5, built by the csc.exe inside Windows
 services/       one directory per service. NONE is installed by default
   lib/            the directory protocol, written once, for Python controllers
   echo/           needs no GPU. Install this first
-  chatterbox/     speech, on the card or on the processor. About 6.3 GB
+  chatterbox/     speech, on the card or on the processor, in two engines:
+                  --engine multilingual (23 languages, expression controls) and
+                  --engine turbo (English only, no expression, 2.36x on a 3070)
+  voxtral/        Voxtral-4B-TTS at int4: twenty FIXED preset voices in nine
+                  languages, no cloning, 0.104x realtime. Its own tree and its
+                  own torch, because it cannot share chatterbox's
   tests/          the stdin protocol, which is the one thing both halves share
 tests/          400 assertions, no network, no GPU, no console session
 tools/          loadgen and a fake job, for exercising the yield path

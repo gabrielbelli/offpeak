@@ -21,7 +21,7 @@
 #     uv.exe        a single ~17 MB binary with no prerequisites of its own
 #     python\       CPython 3.12, fetched by uv from python-build-standalone
 #     .venv\        the 112-package locked environment
-#     models\       HF_HOME. ~3 GiB of weights, content-addressed
+#     models\       HF_HOME. ~3 GiB per engine of weights, content-addressed
 #     cache\        uv's wheel cache
 #
 # Uninstall is: delete that directory.
@@ -35,7 +35,14 @@
 # in 1.14 seconds, verified with a completely empty environment and no system
 # Python reachable at all.
 #
+# TWO ENGINES OUT OF ONE TREE. -Engine turbo fetches the Chatterbox Turbo
+# checkpoint instead of the multilingual one and writes .installed-turbo instead
+# of .installed. Everything above the models step is shared and is provisioned
+# once, so the second engine costs its weights and nothing else: about 3.8 GB
+# rather than another 8.8 GB.
+#
 #   powershell -ExecutionPolicy Bypass -File provision.ps1
+#   powershell -ExecutionPolicy Bypass -File provision.ps1 -Engine turbo
 
 [CmdletBinding()]
 param(
@@ -55,6 +62,18 @@ param(
     # on spring, and $PSScriptRoot is empty there too under -File. Resolved in the
     # body instead, where both are populated.
     [string]$Project = '',
+    # WHICH CHECKPOINT. Both engines run out of ONE tree: the same uv, the same
+    # CPython, the same 5 GB virtual environment and the same torch, because
+    # tts_turbo.py ships inside the chatterbox-tts wheel that is already there.
+    # The only thing that differs is which weights are fetched and which ready
+    # marker is written, so this script provisions the shared parts once and
+    # branches at the end.
+    #
+    # RUN IN EITHER ORDER. `uv sync --frozen` is a sub-second no-op when the
+    # environment is already correct, so installing turbo first and multilingual
+    # second costs nothing extra either way round.
+    [ValidateSet('multilingual', 'turbo')]
+    [string]$Engine = 'multilingual',
     [switch]$SkipModels
 )
 
@@ -177,18 +196,45 @@ print("vram free/total %.0f / %.0f MiB" % (free/2**20, total/2**20))
     if ($LASTEXITCODE -ne 0) { throw "CUDA check failed" }
 
     # ----------------------------------------------------------- models ---
+    # THE ONE THING THAT DIFFERS BETWEEN THE TWO ENGINES. Everything above this
+    # line is shared and is why installing the second engine costs 3.8 GB rather
+    # than another 8.8.
     if (-not $SkipModels) {
-        # ~3.0 GiB, into $Root\models via HF_HOME. Done here rather than on first
-        # job so that the first job is not a twenty-minute download during
-        # somebody's idle window.
-        Set-Status 'downloading Chatterbox weights (3.0 GB)'
-        $fetch = @'
+        # Into $Root\models via HF_HOME, which is the SAME cache the controller
+        # reads at run time - the agent sets the identical value for both. Done
+        # here rather than on the first job so that the first job is not a
+        # twenty-minute download during somebody's idle window.
+        #
+        # from_pretrained, NOT a hand-picked file list. It is the exact call the
+        # controller makes, with the same allow_patterns, so what is fetched here
+        # is what will be found there and nothing is downloaded twice. (Those
+        # patterns do pull s3gen.safetensors, about 1 GiB that turbo's from_local
+        # never opens. Narrowing them would save it and would also mean guessing,
+        # from outside, which weights a model we did not write needs. Measured and
+        # left alone deliberately.)
+        #
+        # It also LOADS the model, on the CPU, which is the gate: a checkpoint
+        # that will not construct fails here, loudly, while somebody is watching,
+        # rather than at the first job as a relaunch loop nothing reports.
+        if ($Engine -eq 'turbo') {
+            Set-Status 'downloading Chatterbox Turbo weights (3.8 GB)'
+            $fetch = @'
+import os
+from chatterbox.tts_turbo import ChatterboxTurboTTS
+print("HF_HOME =", os.environ.get("HF_HOME"))
+ChatterboxTurboTTS.from_pretrained(device="cpu")
+print("weights present")
+'@
+        } else {
+            Set-Status 'downloading Chatterbox weights (3.0 GB)'
+            $fetch = @'
 import os
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 print("HF_HOME =", os.environ.get("HF_HOME"))
 ChatterboxMultilingualTTS.from_pretrained(device="cpu")
 print("weights present")
 '@
+        }
         $fetch | & $py -
         if ($LASTEXITCODE -ne 0) { throw "model download failed" }
     }
@@ -216,14 +262,30 @@ print("weights present")
 
     Clear-Status
 
-    # THE READY MARKER, AND IT IS THE LAST THING THIS SCRIPT DOES. Six gigabytes is
-    # twenty minutes of download; an install interrupted at fifteen must read as
-    # "not installed" rather than "installed and broken". The first is fixed by
-    # running this again, the second is a support question. `idlegpu service list`
-    # reads exactly this file and nothing else.
+    # THE READY MARKER, AND IT IS THE LAST THING THIS SCRIPT DOES. Several
+    # gigabytes is twenty minutes of download; an install interrupted at fifteen
+    # must read as "not installed" rather than "installed and broken". The first
+    # is fixed by running this again, the second is a support question.
+    # `idlegpu service list` reads exactly this file and nothing else.
+    #
+    # AND IT IS NOT THE ONLY THING THE MARKER STANDS BETWEEN. The controller loads
+    # its model BEFORE it publishes its manifest, so a missing checkpoint means
+    # from_pretrained raises, the process exits, and the agent's scheduler - which
+    # inspects no exit code - relaunches it every 500 ms for ever while the lease
+    # sits in pending/ and the client waits out its timeout in silence. Loud in
+    # logs\, invisible everywhere else. Writing this file last is what keeps that
+    # state from being reachable.
+    #
+    # ONE MARKER PER ENGINE, INSIDE A SHARED TREE. The two engines' weights are
+    # different Hugging Face repositories sharing no blobs, so they are separately
+    # installable and separately removable even though everything else here is
+    # common. worker.ini's ReadyMarker for each section names the matching file.
+    $marker = if ($Engine -eq 'turbo') { '.installed-turbo' } else { '.installed' }
+    $serviceName = if ($Engine -eq 'turbo') { 'chatterbox-turbo' } else { 'chatterbox' }
     $torchVersion = (& $py -c "import torch; print(torch.__version__)")
-    Set-Content -Path (Join-Path $Root '.installed') -Encoding UTF8 -Value @"
-service   = chatterbox
+    Set-Content -Path (Join-Path $Root $marker) -Encoding UTF8 -Value @"
+service   = $serviceName
+engine    = $Engine
 python    = $py
 torch     = $torchVersion
 installed = $((Get-Date).ToUniversalTime().ToString('o'))
@@ -231,8 +293,13 @@ installed = $((Get-Date).ToUniversalTime().ToString('o'))
 
     $size = (Get-ChildItem -Recurse -File $Root | Measure-Object -Property Length -Sum).Sum
     Write-Host ""
-    Write-Host ("chatterbox is installed at {0} ({1:N2} GB)" -f $Root, ($size / 1GB))
-    Write-Host "worker.ini needs, in [service.chatterbox]:"
+    # THE WHOLE TREE, AND SAID TO BE THE WHOLE TREE. Both engines live in here, so
+    # this figure is what the directory holds and not what this engine added. A
+    # number presented as an engine's own cost, that is really a shared total, is
+    # how somebody removes one service expecting to get 3.8 GB back.
+    Write-Host ("{0} is installed; {1} now holds {2:N2} GB for every engine in it" -f `
+                $serviceName, $Root, ($size / 1GB))
+    Write-Host "worker.ini needs, in [service.$serviceName]:"
     Write-Host "  Command   = $py"
 }
 catch {
