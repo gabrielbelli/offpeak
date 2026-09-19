@@ -33,15 +33,15 @@
 # listener, the CLI and the policy are one executable of about 120 KB. It
 # downloads nothing. Services are opted into afterwards, one at a time:
 #
-#   idlegpu service list
-#   idlegpu service install echo          about 25 MB, needs no GPU
-#   idlegpu service install chatterbox    about 6 GB, speech on the GPU
+#   offpeak service list
+#   offpeak service install echo          about 25 MB, needs no GPU
+#   offpeak service install chatterbox    about 6 GB, speech on the GPU
 #
 #   powershell -ExecutionPolicy Bypass -File install.ps1
 
 [CmdletBinding()]
 param(
-    [string]$Dest = (Join-Path $env:LOCALAPPDATA 'idlegpu'),
+    [string]$Dest = (Join-Path $env:LOCALAPPDATA 'offpeak'),
     [switch]$UseRunKey,
     [switch]$NoAutostart,
     # AT BOOT, BEFORE ANYBODY SIGNS IN, as a scheduled task running as SYSTEM.
@@ -67,17 +67,17 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Two binaries out of one set of sources: idlegpu.exe is the console build you
-# type at, idlegpuw.exe is the Windows-subsystem build autostart points at so no
+# Two binaries out of one set of sources: offpeak.exe is the console build you
+# type at, offpeakw.exe is the Windows-subsystem build autostart points at so no
 # console flashes on the desktop at every logon. build.ps1 explains the measured
 # defect behind that. python.exe and pythonw.exe are the same pair.
-$srcCli  = Join-Path $here 'dist\idlegpu.exe'
-$srcTray = Join-Path $here 'dist\idlegpuw.exe'
+$srcCli  = Join-Path $here 'dist\offpeak.exe'
+$srcTray = Join-Path $here 'dist\offpeakw.exe'
 if (-not (Test-Path $srcCli)) { throw "build it first: powershell -ExecutionPolicy Bypass -File build.ps1" }
 
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-$exe = Join-Path $Dest 'idlegpu.exe'
-$trayExe = Join-Path $Dest 'idlegpuw.exe'
+$exe = Join-Path $Dest 'offpeak.exe'
+$trayExe = Join-Path $Dest 'offpeakw.exe'
 Copy-Item $srcCli $exe -Force
 if (Test-Path $srcTray) { Copy-Item $srcTray $trayExe -Force } else { $trayExe = $exe }
 
@@ -110,7 +110,7 @@ function Copy-Tree([string]$from, [string]$to, [string[]]$skipDirs) {
 $skip = @('__pycache__', '.venv', 'venv', 'python', 'models', 'cache', 'bin', 'tools')
 
 # The controller scripts and the shared library travel with the agent, so that
-# `idlegpu service install <id>` can find a provisioning script without a git
+# `offpeak service install <id>` can find a provisioning script without a git
 # checkout. These are kilobytes. The gigabytes a service downloads go into
 # runtime\<id>\ underneath and are never copied from here.
 Copy-Tree (Join-Path $here 'services') (Join-Path $Dest 'services') $skip
@@ -126,6 +126,37 @@ $example = Join-Path $here 'worker.ini.example'
 if (-not (Test-Path $ini) -and (Test-Path $example)) { Copy-Item $example $ini }
 if (Test-Path $example) { Copy-Item $example (Join-Path $Dest 'worker.ini.example') -Force }
 
+# RETIRE THE OLD NAME BEFORE REGISTERING THE NEW ONE. This project was called
+# idlegpu until it stopped being only about the GPU. A machine that ran the old
+# build has a scheduled task and one or two Startup shortcuts under that name,
+# all pointing at an exe this installer does not touch -- so without this, the
+# old agent keeps starting at boot beside the new one, both claim the same
+# port, and whichever wins is a coin toss the owner cannot see.
+#
+# Removed by name and only by name: anything else in Startup or Task Scheduler
+# belongs to somebody else.
+function Remove-OldIdlegpu {
+    schtasks /Query /TN 'idlegpu' *> $null
+    if ($LASTEXITCODE -eq 0) {
+        schtasks /Delete /TN 'idlegpu' /F *> $null
+        Write-Host '  retired the old idlegpu scheduled task'
+    }
+    $startup = [Environment]::GetFolderPath('Startup')
+    foreach ($old in @('idlegpu.lnk', 'idlegpu-presence.lnk')) {
+        $path = Join-Path $startup $old
+        if (Test-Path $path) {
+            Remove-Item $path -Force
+            Write-Host "  retired $old"
+        }
+    }
+    $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (Get-ItemProperty -Path $run -Name 'idlegpu' -ErrorAction SilentlyContinue) {
+        Remove-ItemProperty -Path $run -Name 'idlegpu'
+        Write-Host '  retired the old idlegpu Run value'
+    }
+}
+Remove-OldIdlegpu
+
 if ($AtBoot) {
     # A scheduled task, not a Windows service, because a service must implement
     # ServiceBase and answer the service control manager within 30 seconds, and
@@ -136,7 +167,8 @@ if ($AtBoot) {
     # SYSTEM rather than the installing user, because "run whether logged on or
     # not" as a user requires storing that user's password. Nothing here asks
     # anybody for a password.
-    $task = 'idlegpu'
+
+    $task = 'offpeak'
     $cmd = '"' + $exe + '" --serve'
     $r = & schtasks.exe /Create /TN $task /TR $cmd /SC ONSTART /RU SYSTEM /RL HIGHEST /F 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -150,30 +182,30 @@ if ($AtBoot) {
     # decides. If it is not running, the agent falls back to refusing while
     # somebody is signed in, which is the safe answer.
     $startup = [Environment]::GetFolderPath('Startup')
-    $lnk = Join-Path $startup 'idlegpu-presence.lnk'
+    $lnk = Join-Path $startup 'offpeak-presence.lnk'
     $shell = New-Object -ComObject WScript.Shell
     $s = $shell.CreateShortcut($lnk)
     $s.TargetPath = $trayExe
     $s.Arguments = '--presence'
     $s.WorkingDirectory = $Dest
-    $s.Description = 'idlegpu: tell the boot agent whether somebody is at this machine'
+    $s.Description = 'offpeak: tell the boot agent whether somebody is at this machine'
     $s.Save()
     $autostart = "the scheduled task '$task' at boot as SYSTEM, plus $lnk at logon"
     $undo = "schtasks /Delete /TN $task /F; Remove-Item '$lnk'"
 } elseif (-not $NoAutostart) {
     if ($UseRunKey) {
         Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
-            -Name 'idlegpu' -Value ('"' + $trayExe + '"')
-        $autostart = "the HKCU Run value 'idlegpu'"
-        $undo = "Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run idlegpu"
+            -Name 'offpeak' -Value ('"' + $trayExe + '"')
+        $autostart = "the HKCU Run value 'offpeak'"
+        $undo = "Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run offpeak"
     } else {
         $startup = [Environment]::GetFolderPath('Startup')
-        $lnk = Join-Path $startup 'idlegpu.lnk'
+        $lnk = Join-Path $startup 'offpeak.lnk'
         $shell = New-Object -ComObject WScript.Shell
         $s = $shell.CreateShortcut($lnk)
         $s.TargetPath = $trayExe
         $s.WorkingDirectory = $Dest
-        $s.Description = 'idlegpu: lend this GPU while nobody is using it'
+        $s.Description = 'offpeak: lend this GPU while nobody is using it'
         $s.Save()
         $autostart = $lnk
         $undo = "Remove-Item '$lnk'"
@@ -184,7 +216,7 @@ if ($AtBoot) {
 }
 
 Write-Host ""
-Write-Host ("installed idlegpu.exe ({0:N0} bytes) and idlegpuw.exe to {1}" -f (Get-Item $exe).Length, $Dest)
+Write-Host ("installed offpeak.exe ({0:N0} bytes) and offpeakw.exe to {1}" -f (Get-Item $exe).Length, $Dest)
 Write-Host "autostart: $autostart"
 Write-Host ""
 Write-Host "NOTHING ELSE HAS BEEN DOWNLOADED. See what this build can do, and what each"

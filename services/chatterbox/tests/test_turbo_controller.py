@@ -81,13 +81,13 @@ class TheEngineTable(unittest.TestCase):
 
 class TheManifestId(unittest.TestCase):
     def setUp(self):
-        self._had = os.environ.get("IDLEGPU_SERVICE_ID")
+        self._had = os.environ.get("OFFPEAK_SERVICE_ID")
 
     def tearDown(self):
         if self._had is None:
-            os.environ.pop("IDLEGPU_SERVICE_ID", None)
+            os.environ.pop("OFFPEAK_SERVICE_ID", None)
         else:
-            os.environ["IDLEGPU_SERVICE_ID"] = self._had
+            os.environ["OFFPEAK_SERVICE_ID"] = self._had
 
     def test_manifest_id_comes_from_the_service_id_not_a_literal(self):
         """THE DEFECT THIS PREVENTS. Nothing reconciles the id in worker.ini with
@@ -97,16 +97,16 @@ class TheManifestId(unittest.TestCase):
             {"id":"chatterbox-turbo", ..., "manifest":{"id":"chatterbox"}}
         and every layer is satisfied while anything routing on the manifest id
         hands back the other engine."""
-        os.environ["IDLEGPU_SERVICE_ID"] = "speech-on-the-other-box"
+        os.environ["OFFPEAK_SERVICE_ID"] = "speech-on-the-other-box"
         self.assertEqual(controller.manifest("turbo", 24000, "cuda", 4.0, 0)["id"],
                          "speech-on-the-other-box")
         self.assertEqual(controller.manifest("multilingual", 24000, "cuda", 8.0, 0)["id"],
                          "speech-on-the-other-box")
 
     def test_the_two_engines_do_not_default_to_the_same_id(self):
-        """Run by hand outside the agent there is no IDLEGPU_SERVICE_ID, and the
+        """Run by hand outside the agent there is no OFFPEAK_SERVICE_ID, and the
         fallback must still tell the two apart."""
-        os.environ.pop("IDLEGPU_SERVICE_ID", None)
+        os.environ.pop("OFFPEAK_SERVICE_ID", None)
         self.assertEqual(controller.service_id("multilingual"), "chatterbox")
         self.assertEqual(controller.service_id("turbo"), "chatterbox-turbo")
 

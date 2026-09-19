@@ -1,21 +1,35 @@
-# idlegpu
+# offpeak
 
-**Lend a gaming PC's idle GPU to whatever you like, and give it straight back the
-instant its owner wants it.**
+**A gaming PC is idle most of the day. Put those hours to work — and hand the
+machine back the instant its owner wants it.**
 
-One 127 KB executable watches the machine. When nobody is using the GPU it runs
-work you have asked it to run. When somebody starts a game it stops, in well
-under a second, and does not come back for a minute and a half.
+One 127 KB executable watches the machine and lends out what nobody is using.
+Not the graphics card alone: a game takes the GPU and leaves twelve threads
+doing nothing, and a compile takes every thread and leaves the card at five per
+cent. So the card, the processor and the memory are given up separately, on
+five machine states that are each decidable from a signal that exists.
+
+When somebody starts a game it stops, in well under a second, and does not come
+back for a minute and a half.
+
+There is no central server, no account and no broker. The machine listens on
+your own network and you talk to it directly.
+
+```
+offpeak service install echo        # 21 MB, no GPU needed, proves the whole path
+offpeak submit echo --body-file job.json --wait
+offpeak limits                      # what this machine is giving up right now
+```
 
 > **Windows and NVIDIA only.** The detection is `nvidia-smi` plus Windows
 > performance counters, and it depends on details of the WDDM display driver
 > model. There is no Linux or AMD path and none is planned. This is a boundary,
 > not a gap.
 
-```
-idlegpu service install echo        # 21 MB, no GPU needed, proves the whole path
-idlegpu submit echo --body-file job.json --wait
-```
+> **It was called `idlegpu`.** It stopped being only about the GPU when it
+> learned to sell the processor and the memory too. `install.ps1` retires the
+> old scheduled task and Startup shortcuts, so an upgrade does not leave two
+> agents fighting over one port.
 
 ---
 
@@ -108,7 +122,7 @@ game is caught: `\GPU Process Memory(*)\Dedicated Usage` agreed with
 **Every threshold in this document came off one machine and is written into
 `worker.ini`, not into the source.** If your card idles differently they are
 wrong for you, and changing them does not need a compiler. Run
-`idlegpu --calibrate baseline.csv 20` while you are not using the machine, then
+`offpeak --calibrate baseline.csv 20` while you are not using the machine, then
 again while you play, and set them from what you see.
 
 ---
@@ -310,8 +324,8 @@ and the repair is logged rather than silent.
   SYSTEM has no desktop and the person changing what a headless machine lends out
   is usually on SSH:
 
-      idlegpu profile balanced
-      idlegpu limits lightuse cpupct=25 admit=no
+      offpeak profile balanced
+      offpeak limits lightuse cpupct=25 admit=no
       POST /v1/profile   {"profile": "balanced"}
       POST /v1/limits    {"state": "lightuse", "cpu_pct": 25, "admit": false}
 
@@ -334,7 +348,7 @@ it with a number so large it would have been a lie about memory.
 
 ### Checking it on your machine
 
-    idlegpu --limits
+    offpeak --limits
 
 Runs the same code the tray runs against a real job object for about fifty
 seconds, prints the measured share of your machine at each rung, and says whether
@@ -382,16 +396,16 @@ speech never sees a byte of torch.
 A service is opted into explicitly, and only then does it fetch anything:
 
 ```
-idlegpu service list                 # what this build knows about, and what each costs
-idlegpu service install chatterbox   # NOW it downloads
-idlegpu service cost                 # what each one is actually using, measured
-idlegpu service disable chatterbox   # stop running it, keep it on disk
-idlegpu service remove chatterbox    # delete it and reclaim the disk
+offpeak service list                 # what this build knows about, and what each costs
+offpeak service install chatterbox   # NOW it downloads
+offpeak service cost                 # what each one is actually using, measured
+offpeak service disable chatterbox   # stop running it, keep it on disk
+offpeak service remove chatterbox    # delete it and reclaim the disk
 ```
 
 Where two services share one install directory - a second checkpoint for a model
 family that is already there - removing either leaves the tree alone and clears
-only its own ready marker. `idlegpu service remove <id> --purge` deletes the tree,
+only its own ready marker. `offpeak service remove <id> --purge` deletes the tree,
 and refuses until every service sharing it has been removed.
 
 ### Three states, never conflated
@@ -428,8 +442,8 @@ runner that was never going to say yes.
 | | files | size |
 |---|---|---|
 | **base install** | **13** | **426 KB** |
-| `idlegpu.exe` (console build) | 1 | 127 KB |
-| `idlegpuw.exe` (tray build) | 1 | 127 KB |
+| `offpeak.exe` (console build) | 1 | 127 KB |
+| `offpeakw.exe` (tray build) | 1 | 127 KB |
 | everything else (config, controller scripts, `uv.lock`) | 11 | 172 KB |
 
 Per service, only if you install it:
@@ -464,7 +478,7 @@ Per service, only if you install it:
 > was the one the audio was measured on and it held 68 packages; the lock beside
 > `services/voxtral/pyproject.toml` resolves 35, having dropped a librosa tree
 > nothing in the import path touches. So the finished tree is that size or
-> smaller, and `idlegpu service cost` measures the real one. It passes about
+> smaller, and `offpeak service cost` measures the real one. It passes about
 > 16.7 GB during the install, before the wheel cache is reclaimed.
 >
 > The duplicated CPython - about 60 MiB against 12 GiB - is the correct trade and
@@ -478,15 +492,15 @@ Per service, only if you install it:
 > re-imports torch afterwards and fails loudly rather than quietly if that
 > assumption was ever wrong on a filesystem where uv hardlinks instead of copies.
 
-`idlegpu service cost` walks the directories and prints the real numbers for your
+`offpeak service cost` walks the directories and prints the real numbers for your
 machine. It measures rather than quoting this table, because a figure in a README
 ages the moment a dependency does.
 
 > Two binaries, not one, and the reason is measured. A Windows-subsystem
-> executable is not waited for by a shell. Over SSH, `idlegpu service list` built
+> executable is not waited for by a shell. Over SSH, `offpeak service list` built
 > as a single `winexe` printed nothing, set no exit code, and dumped its output
 > into the middle of the *next* command; redirecting to a file produced zero
-> bytes. So `idlegpu.exe` is the console build you type at and `idlegpuw.exe` is
+> bytes. So `offpeak.exe` is the console build you type at and `offpeakw.exe` is
 > the windowed build autostart points at, exactly as `python.exe` and
 > `pythonw.exe` are.
 
@@ -500,12 +514,12 @@ required to build: the C# compiler ships inside the operating system.
 
 ```powershell
 git clone <this repo>
-cd idlegpu
+cd offpeak
 powershell -ExecutionPolicy Bypass -File build.ps1
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-That copies 426 KB into `%LOCALAPPDATA%\idlegpu` and puts a shortcut in your
+That copies 426 KB into `%LOCALAPPDATA%\offpeak` and puts a shortcut in your
 Startup folder. It downloads nothing.
 
 ### Start in `Off` mode for a week
@@ -524,8 +538,8 @@ did, you have found a threshold to change before it could cost you a match.
 ### Then install a service
 
 ```powershell
-idlegpu service install echo        # 21.5 MiB, needs no GPU
-idlegpu service list
+offpeak service install echo        # 21.5 MiB, needs no GPU
+offpeak service list
 ```
 
 `echo` exists so you can exercise the entire path — submit, schedule, run, yield,
@@ -567,13 +581,13 @@ same sentence spoken twice.
 First class, because some services are command lines by nature.
 
 ```
-idlegpu status
-idlegpu services
-idlegpu submit hashcat -- -m 22000 hash.hc22000 rockyou.txt
-idlegpu watch hashcat <job>
-idlegpu result hashcat <job> -o cracked.txt
-idlegpu mode Off
-idlegpu fingerprint
+offpeak status
+offpeak services
+offpeak submit hashcat -- -m 22000 hash.hc22000 rockyou.txt
+offpeak watch hashcat <job>
+offpeak result hashcat <job> -o cracked.txt
+offpeak mode Off
+offpeak fingerprint
 ```
 
 Everything after `--` becomes `{"argv": [...]}` and is handed to the controller
@@ -601,7 +615,7 @@ SHA-256. Clients compare `GetCertHashString()` against that value and refuse
 anything else.
 
 ```powershell
-idlegpu fingerprint
+offpeak fingerprint
 # 2ddc244cfcd75ef2a86f5d4434d7c20aeaae4fcaa416dfe8d409cd23440151e9
 ```
 
@@ -742,7 +756,7 @@ per service, because "it yielded in 2.1 s" means something very different if
 
 ## Containment, and the four things outside the folder
 
-**Everything lives in one directory**, `%LOCALAPPDATA%\idlegpu`: the executables,
+**Everything lives in one directory**, `%LOCALAPPDATA%\offpeak`: the executables,
 the config, the log, the TLS key, the queues, the asset store, and everything any
 service ever downloads — its Python, its site-packages, its model weights, its
 caches.
@@ -785,12 +799,12 @@ discovered later:
 ## Uninstall
 
 ```powershell
-Remove-Item "$([Environment]::GetFolderPath('Startup'))\idlegpu.lnk"
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\idlegpu"
+Remove-Item "$([Environment]::GetFolderPath('Startup'))\offpeak.lnk"
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\offpeak"
 ```
 
 That is everything, including every gigabyte any service downloaded. Add
-`Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run idlegpu`
+`Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run offpeak`
 if you installed with `-UseRunKey`, and remove the inbound firewall rule if you
 ever created one.
 
@@ -803,7 +817,7 @@ ever created one.
 To reclaim a service's disk without uninstalling:
 
 ```powershell
-idlegpu service remove chatterbox
+offpeak service remove chatterbox
 ```
 
 ---
@@ -995,7 +1009,18 @@ LUPINE's server side is Linux-only while this GPU is in Windows.
 - `GameProcessNames` and `VramAllowlist` ship as one person's software and **will
   be wrong for you**. Epic, Game Pass, GOG and Battle.net set no Steam
   `RunningAppID`, so for anything launched from those the VRAM veto is the only
-  backstop. `idlegpu status --json` shows what it is objecting to under
+  backstop. `offpeak status --json` shows what it is objecting to under
   `foreign_vram`, which is how you find out what to add.
 - A controller that ignores `YIELD` forces the job-object kill. The GPU is always
   reclaimed; any un-checkpointed state that controller held is lost.
+
+---
+
+## Licence
+
+BSD 2-Clause. See [LICENSE](LICENSE).
+
+`spring` throughout this document is the machine every measurement was taken
+on: a Ryzen with 31.9 GiB of memory and an NVIDIA card, running Windows 11.
+A realtime factor or an idle baseline is a property of a machine, so the
+machine is named rather than left implied.

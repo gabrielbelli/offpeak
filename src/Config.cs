@@ -28,7 +28,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public class Config
     {
@@ -216,7 +216,7 @@ namespace IdleGpu
         /// into one folder, so the folder holding the exe IS the install and
         /// deriving from it is both correct and account independent. Reading
         /// %LOCALAPPDATA% instead meant a task running as SYSTEM resolved to
-        /// C:\Windows\System32\config\systemprofile\AppData\Local\idlegpu, an
+        /// C:\Windows\System32\config\systemprofile\AppData\Local\offpeak, an
         /// empty directory, and reported no installed services at all while two
         /// sat provisioned and ready a few folders away. Measured, not feared.
         ///
@@ -237,7 +237,7 @@ namespace IdleGpu
             catch (Exception) { }
             return Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "idlegpu");
+                "offpeak");
         }
 
         /// The tray mode, persisted. Auto | AlwaysOn | Off.
@@ -266,15 +266,15 @@ namespace IdleGpu
 
         /// Parent of the per-service install directories. EVERYTHING ANY SERVICE
         /// EVER DOWNLOADS lives under here, one directory per service, so that
-        /// `idlegpu service remove chatterbox` is one recursive delete and the
-        /// number `idlegpu service cost` prints is a real measurement rather than a
+        /// `offpeak service remove chatterbox` is one recursive delete and the
+        /// number `offpeak service cost` prints is a real measurement rather than a
         /// claim in a README.
         ///
         /// Deliberately NOT the same directory as the controller scripts. The
         /// scripts are a few kilobytes that came from the repository and are put
         /// there by install.ps1; the downloads are gigabytes that came off the
         /// internet. Removing a service must reclaim the second without destroying
-        /// the first, because destroying the first means `idlegpu service install`
+        /// the first, because destroying the first means `offpeak service install`
         /// can no longer find the provisioning script it is being asked to re-run.
         public string RuntimeRoot = "";
 
@@ -1158,7 +1158,7 @@ namespace IdleGpu
         }
 
         /// One row, as `state field=value field=value`, for POST /v1/limits and
-        /// for `idlegpu limits`.
+        /// for `offpeak limits`.
         ///
         /// WHY A STRING AND NOT A STRUCT. Command carries one string across the
         /// queue that keeps the policy thread the single writer, and inventing a
@@ -1266,7 +1266,7 @@ namespace IdleGpu
         public int ClientPort = 0;
 
         /// The SHA-256 the client pins, lower case hex, colons optional. Printed
-        /// by `idlegpu fingerprint` and by the agent on first run.
+        /// by `offpeak fingerprint` and by the agent on first run.
         public string CertFingerprint = "";
     }
 
@@ -1337,8 +1337,8 @@ namespace IdleGpu
         // Enabled is FALSE by default, so a [service.chatterbox] section that
         // arrives in the shipped example file is a service this build KNOWS ABOUT
         // and has not installed. It costs nothing, downloads nothing and appears in
-        // `idlegpu service list` as known. It becomes real only when somebody runs
-        // `idlegpu service install <id>`, which runs Provision and then writes
+        // `offpeak service list` as known. It becomes real only when somebody runs
+        // `offpeak service install <id>`, which runs Provision and then writes
         // Enabled = true back into worker.ini.
         //
         // The defect this prevents is the obvious one and it is expensive: a person

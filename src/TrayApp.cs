@@ -26,7 +26,7 @@ using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public class TrayApp : ApplicationContext
     {

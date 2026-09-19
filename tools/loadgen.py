@@ -26,7 +26,7 @@ machine and not a nicety.
 
   python runner-venv\\Scripts\\python.exe loadgen.py --seconds 60 --vram-mib 2000
 
-Run it in one window and `idlegpu.exe --calibrate busy.csv 2` in another.
+Run it in one window and `offpeak.exe --calibrate busy.csv 2` in another.
 """
 
 import argparse

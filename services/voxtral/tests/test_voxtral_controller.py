@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "lib"))
 sys.path.insert(0, os.path.join(_HERE, ".."))
 
 import controller                                                   # noqa: E402
-import idlegpu_service as svc                                       # noqa: E402
+import offpeak_service as svc                                       # noqa: E402
 
 try:
     import scipy.signal                                             # noqa: F401
@@ -89,13 +89,13 @@ class RuntimeShape(object):
 
 class TheManifestId(unittest.TestCase):
     def setUp(self):
-        self._had = os.environ.get("IDLEGPU_SERVICE_ID")
+        self._had = os.environ.get("OFFPEAK_SERVICE_ID")
 
     def tearDown(self):
         if self._had is None:
-            os.environ.pop("IDLEGPU_SERVICE_ID", None)
+            os.environ.pop("OFFPEAK_SERVICE_ID", None)
         else:
-            os.environ["IDLEGPU_SERVICE_ID"] = self._had
+            os.environ["OFFPEAK_SERVICE_ID"] = self._had
 
     def _manifest(self):
         return controller.manifest(TWENTY, SETTINGS, DEFAULTS, 24000, "cuda",
@@ -109,11 +109,11 @@ class TheManifestId(unittest.TestCase):
             {"id":"voxtral", ..., "manifest":{"id":"chatterbox"}}
         and every layer is satisfied while anything routing on the manifest id
         hands back the other engine."""
-        os.environ["IDLEGPU_SERVICE_ID"] = "speech-on-the-other-box"
+        os.environ["OFFPEAK_SERVICE_ID"] = "speech-on-the-other-box"
         self.assertEqual(self._manifest()["id"], "speech-on-the-other-box")
 
     def test_run_by_hand_it_still_names_itself(self):
-        os.environ.pop("IDLEGPU_SERVICE_ID", None)
+        os.environ.pop("OFFPEAK_SERVICE_ID", None)
         self.assertEqual(controller.service_id(), "voxtral")
 
 
@@ -429,7 +429,7 @@ class NoBranchOnAServiceName(unittest.TestCase):
             self.assertEqual(
                 found, [],
                 "%s names the service in its code; the id comes from "
-                "IDLEGPU_SERVICE_ID and nowhere else" % func.__name__)
+                "OFFPEAK_SERVICE_ID and nowhere else" % func.__name__)
 
 
 class TheVoicesComeOffTheDisk(unittest.TestCase):

@@ -49,7 +49,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public class Policy
     {

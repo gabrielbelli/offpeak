@@ -58,10 +58,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
-import idlegpu_service as svc                                   # noqa: E402
+import offpeak_service as svc                                   # noqa: E402
 
 # The id this controller answers to when it is run BY HAND, outside the agent.
-# Under the agent it comes from IDLEGPU_SERVICE_ID and this is never read; see
+# Under the agent it comes from OFFPEAK_SERVICE_ID and this is never read; see
 # service_id() for the copy-paste defect that arrangement exists to prevent.
 DEFAULT_SERVICE_ID = "voxtral"
 
@@ -213,7 +213,7 @@ def service_id():
     hands back the other engine - and the only symptom is audio in the wrong
     voice at the wrong speed. The fallback is for running this by hand.
     """
-    from_agent = os.getenv("IDLEGPU_SERVICE_ID", "").strip()
+    from_agent = os.getenv("OFFPEAK_SERVICE_ID", "").strip()
     return from_agent or DEFAULT_SERVICE_ID
 
 
@@ -976,10 +976,10 @@ def _validate_flags(args):
 def main():
     _assert_utf8_mode()
 
-    # BOTH DEFAULTS COME OFF IDLEGPU_SERVICE_ROOT, which the agent sets to this
+    # BOTH DEFAULTS COME OFF OFFPEAK_SERVICE_ROOT, which the agent sets to this
     # service's own install directory. So worker.ini names neither, and a
     # by-hand run in a copy of the tree finds its own copy of everything.
-    service_root = Path(os.getenv("IDLEGPU_SERVICE_ROOT", "."))
+    service_root = Path(os.getenv("OFFPEAK_SERVICE_ROOT", "."))
     default_model = str(service_root / "models" / "original")
     default_wrapper = str(service_root / "voxtral-int4" / "src")
     ap = argparse.ArgumentParser(description=__doc__)
@@ -1077,7 +1077,7 @@ def main():
         # act, so reaching here with no embeddings means somebody moved or
         # part-deleted the weights. Publishing an empty list and refusing every
         # job by name is more useful than a process that will not start: the
-        # refusal names the directory, and `idlegpu services` shows it.
+        # refusal names the directory, and `offpeak services` shows it.
         svc.log("no voice embeddings found; every job will be refused",
                 voice_dir=rt.voice_dir)
 

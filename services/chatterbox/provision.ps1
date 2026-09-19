@@ -17,7 +17,7 @@
 # NOTHING IS INSTALLED ON THE MACHINE. No Python, no CUDA Toolkit, no admin, no
 # reboot, no PATH edit, no registry write. Everything lands in one directory:
 #
-#   %LOCALAPPDATA%\idlegpu\runtime\
+#   %LOCALAPPDATA%\offpeak\runtime\
 #     uv.exe        a single ~17 MB binary with no prerequisites of its own
 #     python\       CPython 3.12, fetched by uv from python-build-standalone
 #     .venv\        the 112-package locked environment
@@ -46,7 +46,7 @@
 
 [CmdletBinding()]
 param(
-    # Mandatory, and passed in by `idlegpu service install chatterbox`. There is no
+    # Mandatory, and passed in by `offpeak service install chatterbox`. There is no
     # default on purpose: a provisioning script that guesses where to put six
     # gigabytes is a provisioning script that will one day put them somewhere the
     # uninstall does not reach.
@@ -107,7 +107,7 @@ try {
     # payload that must survive a reinstall - so they must never land inside the
     # virtual environment where a rebuild would take them with it.
     #
-    # DEFERS TO THE ENVIRONMENT WHEN THERE IS ONE. `idlegpu service install` sets
+    # DEFERS TO THE ENVIRONMENT WHEN THERE IS ONE. `offpeak service install` sets
     # all of these before launching this script, and sets the SAME values again for
     # the controller at run time (Install.ContainedEnvironment). If this script
     # overrode them, provisioning would download weights to one path and the
@@ -266,7 +266,7 @@ print("weights present")
     # gigabytes is twenty minutes of download; an install interrupted at fifteen
     # must read as "not installed" rather than "installed and broken". The first
     # is fixed by running this again, the second is a support question.
-    # `idlegpu service list` reads exactly this file and nothing else.
+    # `offpeak service list` reads exactly this file and nothing else.
     #
     # AND IT IS NOT THE ONLY THING THE MARKER STANDS BETWEEN. The controller loads
     # its model BEFORE it publishes its manifest, so a missing checkpoint means

@@ -23,7 +23,7 @@ using System.Text;
 using System.Threading;
 using Microsoft.Win32;
 
-namespace IdleGpu
+namespace OffPeak
 {
     // ---------------------------------------------------------------- GPU ---
 
@@ -560,7 +560,7 @@ namespace IdleGpu
         /// measured during this investigation. Probe p3 on spring:
         ///
         ///   ssh session id            : 0
-        ///   query session             : console / htcga / id 1 / Active
+        ///   query session             : console / <user> / id 1 / Active
         ///   WTSGetActiveConsoleSessionId: 1
         ///   GetForegroundWindow()     : 0        (session 0 has no desktop)
         ///   GetLastInputInfo()        : 620953 ms (session 0's own input, meaningless)

@@ -36,7 +36,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
-namespace IdleGpu
+namespace OffPeak
 {
     /// Runs one service's controller as a child process inside a Windows job object.
     ///
@@ -306,7 +306,7 @@ namespace IdleGpu
         /// Tell a RUNNING controller how thinly to spread itself.
         ///
         /// THE GAP THIS CLOSES, and it was the one thing in this design that did
-        /// not bind live. IDLEGPU_CPU_THREADS is an environment variable, so it is
+        /// not bind live. OFFPEAK_CPU_THREADS is an environment variable, so it is
         /// frozen at Process.Start: a job started while nobody was signed in came
         /// up with a thread per core, and when the owner sat down and the cap fell
         /// to ten per cent the kernel squeezed it correctly while the job carried
@@ -530,7 +530,7 @@ namespace IdleGpu
                 foreach (KeyValuePair<string, string> kv in Install.ContainedEnvironment(_svc, _c))
                     psi.EnvironmentVariables[kv.Key] = kv.Value;
                 if (CpuThreads > 0)
-                    psi.EnvironmentVariables["IDLEGPU_CPU_THREADS"] =
+                    psi.EnvironmentVariables["OFFPEAK_CPU_THREADS"] =
                         CpuThreads.ToString(CultureInfo.InvariantCulture);
 
                 PrepareChildLog();

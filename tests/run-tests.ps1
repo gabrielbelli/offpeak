@@ -16,7 +16,7 @@ $root = Split-Path -Parent $here
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
 
-$out = Join-Path ([IO.Path]::GetTempPath()) ("idlegpu-tests-" + [Guid]::NewGuid().ToString("N"))
+$out = Join-Path ([IO.Path]::GetTempPath()) ("offpeak-tests-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $out | Out-Null
 try {
     $exe = Join-Path $out "tests.exe"

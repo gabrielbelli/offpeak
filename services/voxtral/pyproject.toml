@@ -24,7 +24,7 @@
 # fetches exactly that build for chatterbox, so uv reuses the download.
 
 [project]
-name = "idlegpu-voxtral"
+name = "offpeak-voxtral"
 version = "0.1.0"
 description = "Voxtral-4B-TTS int4, as a child process that can be killed at any moment"
 requires-python = "==3.12.*"

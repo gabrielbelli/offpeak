@@ -33,7 +33,7 @@ using System.IO;
 using System.Net;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public class ApiContext
     {
@@ -322,7 +322,7 @@ namespace IdleGpu
                     // agent should be allocating on a request thread.
                     Http.WriteFile(outp, ContentType(name), fs, fi.Length, new string[] {
                         "Content-Disposition: attachment; filename=\"" + name + "\"",
-                        "X-IdleGpu-Artefact: " + name
+                        "X-OffPeak-Artefact: " + name
                     });
                 }
             }
@@ -460,8 +460,8 @@ namespace IdleGpu
             string want = q.Param("mode");
             if (string.IsNullOrEmpty(want)) want = Json.PeekString(q.BodyText(), "mode");
             if (string.IsNullOrEmpty(want)) want = q.BodyText().Trim();
-            IdleGpu.Mode parsed;
-            try { parsed = (IdleGpu.Mode)Enum.Parse(typeof(IdleGpu.Mode), want, true); }
+            OffPeak.Mode parsed;
+            try { parsed = (OffPeak.Mode)Enum.Parse(typeof(OffPeak.Mode), want, true); }
             catch (Exception)
             {
                 Http.WriteError(outp, 400, "mode must be Auto, AlwaysOn or Off");

@@ -1,4 +1,4 @@
-# idlegpu settings. Copy to worker.ini beside idlegpu.exe.
+# offpeak settings. Copy to worker.ini beside offpeak.exe.
 #
 # Every value here is the built-in default, so the file only needs the lines you
 # actually want to change. Section headers are for your eyes: the key names are
@@ -9,7 +9,7 @@
 # measured on a single desktop with an RTX 3070 on Windows 11, and is written
 # down here rather than buried in the source so that you can change it without a
 # compiler. If your card idles differently, these are wrong for you. Run
-#   idlegpu --calibrate baseline.csv 20
+#   offpeak --calibrate baseline.csv 20
 # while you are NOT using the machine, then again while you play, and set them
 # from what you see.
 
@@ -59,7 +59,7 @@ Port                 = 47600
 # The bearer token. A file keeps the secret out of a config you might paste into
 # a bug report. Leave both unset on loopback; the agent generates a key file for
 # you if you set ApiKeyFile and bind beyond loopback.
-# ApiKeyFile         = C:\Users\you\AppData\Local\idlegpu\api-key.txt
+# ApiKeyFile         = C:\Users\you\AppData\Local\offpeak\api-key.txt
 # ApiKey             =
 
 # Who may connect when Bind is not loopback. IPv4 CIDR, comma separated. Empty
@@ -68,10 +68,10 @@ Port                 = 47600
 
 # TLS. The agent mints a self-signed certificate on first run into the contained
 # directory, touching no certificate store. Clients pin the SHA-256 of it:
-#   idlegpu fingerprint
+#   offpeak fingerprint
 # ServerName defaults to this machine's name, detected at run time. Add whatever
 # else clients will type in the address bar.
-# CertPath           = C:\Users\you\AppData\Local\idlegpu\certs\server.pfx
+# CertPath           = C:\Users\you\AppData\Local\offpeak\certs\server.pfx
 # ServerName         = thatmachine
 # CertExtraSans      = thatmachine.lan,192.0.2.11
 # CertYears          = 5
@@ -80,7 +80,7 @@ Port                 = 47600
 # these; the agent ignores them. Unset means "the local agent".
 # ClientHost         = 192.0.2.11
 # ClientPort         = 47600
-# CertFingerprint    = aa62a67f...   (idlegpu fingerprint on the runner prints it)
+# CertFingerprint    = aa62a67f...   (offpeak fingerprint on the runner prints it)
 
 # Limits for a hand written server that may end up on a LAN. These are the
 # slowloris knobs: a client that opens a socket and dribbles one byte a minute is
@@ -135,7 +135,7 @@ ForeignVramBusyMiB   = 512
 #
 # THIS LIST IS FROM ONE PERSON'S DESKTOP AND WILL BE WRONG FOR YOURS. Anything
 # you run that holds more than ForeignVramBusyMiB and is not here will make the
-# agent yield for ever. `idlegpu status --json` shows what it is objecting to
+# agent yield for ever. `offpeak status --json` shows what it is objecting to
 # under foreign_vram, which is how you find out what to add.
 VramAllowlist        = dwm,explorer,csrss,ShellHost,SearchHost,StartMenuExperienceHost,ShellExperienceHost,ApplicationFrameHost,SystemSettings,CrossDeviceResume,TextInputHost,SearchApp,System,msedgewebview2,steamwebhelper,steam,steamservice,LogonUI,sihost,ctfmon
 
@@ -362,10 +362,10 @@ limits.busy.admit               = no
 # installed" from "somebody is gaming" retries for ever against a runner that was
 # never going to say yes.
 #
-#   idlegpu service list             what is known, and what each would cost
-#   idlegpu service install echo     fetch it, then turn it on
-#   idlegpu service cost             what each one is using, measured
-#   idlegpu service remove echo      delete it and reclaim the disk
+#   offpeak service list             what is known, and what each would cost
+#   offpeak service install echo     fetch it, then turn it on
+#   offpeak service cost             what each one is using, measured
+#   offpeak service remove echo      delete it and reclaim the disk
 #
 # Adding a service of your own is one section here plus one controller script and
 # no C# at all. See docs/ADDING-A-SERVICE.md.
@@ -475,7 +475,7 @@ Arguments            = "%SCRIPTS%\chatterbox\controller.py" --queue "%QUEUE%" --
 Device               = cpu
 # THE SAME TREE AND THE SAME MARKER AS [service.chatterbox]. Same weights, same
 # venv, same download - so "installed" is one fact about one tree and not two,
-# and installing either one installs both. `idlegpu service remove` knows they
+# and installing either one installs both. `offpeak service remove` knows they
 # share and will not delete the tree out from under the other; see Install.cs.
 InstallDir           = %RUNTIME%\chatterbox
 ReadyMarker          = %INSTALL%\.installed
@@ -670,7 +670,7 @@ YieldGraceSeconds    = 2
 #
 # IT IS AN UPPER BOUND MEASURED ON A REAL TREE, not an estimate: the environment
 # those 4.59 GB came from is the one the audio was measured on and it held 68
-# packages, where the lock resolves 35. `idlegpu service cost` measures yours.
+# packages, where the lock resolves 35. `offpeak service cost` measures yours.
 SizeHint             = up to 12.2 GB, none of it shared (7.5 GB of weights, 4.6 GB of a second torch cu126)
 # SYSTEM memory for the admission check, not VRAM. The load reads 8.0 GB of BF16
 # off disk and holds it while it quantises, so the resident peak is the BF16
@@ -738,9 +738,9 @@ ReadyMarker          = %INSTALL%\.installed
 # has no absolute path in it and works unedited on anybody's machine:
 #
 #   %RUNTIME%  RuntimeRoot, where services put what they download
-#              (default %LOCALAPPDATA%\idlegpu\runtime)
+#              (default %LOCALAPPDATA%\offpeak\runtime)
 #   %SCRIPTS%  ScriptsRoot, where the controller scripts were installed
-#              (default %LOCALAPPDATA%\idlegpu\services)
+#              (default %LOCALAPPDATA%\offpeak\services)
 #   %QUEUE%    this service's own queue directory
 #
 # Write absolute paths instead if you would rather; nothing requires these.

@@ -23,5 +23,5 @@ using System.Reflection;
 using System.Runtime.Versioning;
 
 [assembly: TargetFramework(".NETFramework,Version=v4.8")]
-[assembly: AssemblyTitle("idlegpu")]
+[assembly: AssemblyTitle("offpeak")]
 [assembly: AssemblyDescription("Lend a gaming PC's GPU to whatever you like, and give it straight back")]

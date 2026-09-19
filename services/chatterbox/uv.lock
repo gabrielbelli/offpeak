@@ -431,7 +431,7 @@ wheels = [
 ]
 
 [[package]]
-name = "idlegpu-chatterbox"
+name = "offpeak-chatterbox"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

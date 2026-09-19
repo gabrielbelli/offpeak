@@ -19,7 +19,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     static class Tests
     {
@@ -539,7 +539,7 @@ namespace IdleGpu
 
         static string TempDir()
         {
-            string d = Path.Combine(Path.GetTempPath(), "idlegpu-t-" + Guid.NewGuid().ToString("N"));
+            string d = Path.Combine(Path.GetTempPath(), "offpeak-t-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(d);
             return d;
         }
@@ -733,7 +733,7 @@ namespace IdleGpu
             finally { Nuke(root); }
         }
 
-        /// THE DEFECT THIS PREVENTS: `idlegpu service enable a` turning on service
+        /// THE DEFECT THIS PREVENTS: `offpeak service enable a` turning on service
         /// b, because the writer matched the first Enabled line in the file rather
         /// than the first one inside the right section. Both sections have one.
         static void EnabledIsWrittenIntoTheRightSectionOnly()
@@ -1396,7 +1396,7 @@ namespace IdleGpu
             // And the round trip through a real fixture-shaped file: present and
             // low really does refuse, so the column is wired up and not merely
             // parsed.
-            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-mem-" + Guid.NewGuid().ToString("N"));
+            string dir = Path.Combine(Path.GetTempPath(), "offpeak-mem-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             try
             {
@@ -1432,7 +1432,7 @@ namespace IdleGpu
         static void AGridThatInvertsTheLadderIsRepairedNotObeyed()
         {
             Case("a grid that inverts the ladder is repaired, not obeyed");
-            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-mono-" + Guid.NewGuid().ToString("N"));
+            string dir = Path.Combine(Path.GetTempPath(), "offpeak-mono-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             try
             {
@@ -1479,7 +1479,7 @@ namespace IdleGpu
         static void AProfileDoesNotDependOnWhereItSitsInTheFile()
         {
             Case("a profile does not depend on where it sits in the file");
-            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-prof-" + Guid.NewGuid().ToString("N"));
+            string dir = Path.Combine(Path.GetTempPath(), "offpeak-prof-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             try
             {
@@ -1532,7 +1532,7 @@ namespace IdleGpu
         static void ASavedProfileComesBackWithItsName()
         {
             Case("a saved posture comes back with its name");
-            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-saved-" + Guid.NewGuid().ToString("N"));
+            string dir = Path.Combine(Path.GetTempPath(), "offpeak-saved-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             try
             {
@@ -1990,7 +1990,7 @@ namespace IdleGpu
         static void LimitsSurviveARoundTripThroughWorkerIni()
         {
             Case("the limits matrix survives a round trip through worker.ini");
-            string dir = Path.Combine(Path.GetTempPath(), "idlegpu-limits-" + Guid.NewGuid().ToString("N"));
+            string dir = Path.Combine(Path.GetTempPath(), "offpeak-limits-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             try
             {

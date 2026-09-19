@@ -19,7 +19,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
-import idlegpu_service as svc
+import offpeak_service as svc
 
 
 class StdinProtocol(unittest.TestCase):

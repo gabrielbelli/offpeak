@@ -7,7 +7,7 @@ below came from a probe in `probe/`, run on:
     spring, AMD Ryzen 7 5700X3D, 8 cores / 16 threads, single CCD, 96 MiB L3
     31.9 GiB of memory, Windows 11 build 26200, .NET Framework 4.8
 
-Numbers from one machine are documented defaults, not laws. `idlegpu --limits`
+Numbers from one machine are documented defaults, not laws. `offpeak --limits`
 re-measures the important ones on yours in about fifty seconds, using the same
 code path the tray uses.
 
@@ -324,7 +324,7 @@ nothing. Zero is the row a game produced. So at the exact moment somebody starte
 a game, the job about to be stopped had its cap **removed** and ran flat out for
 the whole grace period while `Stop()` waited for it. `CpuRate = 0` is rejected by
 the kernel with `INVALID_ARGS`, so zero cannot be expressed and now clamps to one
-per cent. Measured with `idlegpu --limits`: **0.4% of the machine, where it used
+per cent. Measured with `offpeak --limits`: **0.4% of the machine, where it used
 to read about 96%.** Test: `AJobBeingStoppedIsNotUncappedOnTheWayOut`.
 
 **OpenMP burned the whole budget spinning.** Torch's OpenMP runtime does not
@@ -337,7 +337,7 @@ cent cap stops being a ten per cent slowdown and becomes an arbitrary one.
 `Install.ContainedEnvironment` now sets `OMP_WAIT_POLICY=PASSIVE` and
 `KMP_BLOCKTIME=0` on the child.
 
-**The thread count was frozen at `Process.Start`.** `IDLEGPU_CPU_THREADS` is an
+**The thread count was frozen at `Process.Start`.** `OFFPEAK_CPU_THREADS` is an
 environment variable, so a job that came up while nobody was signed in kept a
 thread per core after the owner sat down and the cap fell to ten per cent -
 sixteen threads inside 1.6 cores of budget, which is the worst configuration a
@@ -415,8 +415,8 @@ stays the single writer.
 
     POST /v1/profile   {"profile": "balanced"}
     POST /v1/limits    {"state": "lightuse", "cpu_pct": 25, "admit": false}
-    idlegpu profile balanced
-    idlegpu limits lightuse cpupct=25 admit=no
+    offpeak profile balanced
+    offpeak limits lightuse cpupct=25 admit=no
 
 **Every surface says what is in force**, not only what is on offer: the tray's
 detail line, a tick on the matching rung, the resolved posture name including

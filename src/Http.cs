@@ -49,7 +49,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     /// A refusal with a status code attached. Thrown by the parser, caught by the
     /// listener, turned into a response. Message text is safe to send back: it is

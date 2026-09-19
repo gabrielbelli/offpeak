@@ -11,7 +11,7 @@ dist/
 
 # What a service downloads: about 8 GiB of torch, CUDA and weights for speech
 # alone. uv.lock and pyproject.toml are committed; everything they install is
-# not. In a real install this lives in %LOCALAPPDATA%\idlegpu\runtime and never
+# not. In a real install this lives in %LOCALAPPDATA%\offpeak\runtime and never
 # in a checkout, but a provisioning script run by hand with -Root . would put it
 # here.
 runtime/

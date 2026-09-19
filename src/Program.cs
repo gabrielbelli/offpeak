@@ -27,7 +27,7 @@ using System.Net;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace IdleGpu
+namespace OffPeak
 {
     static class Program
     {
@@ -36,13 +36,13 @@ namespace IdleGpu
         const int ATTACH_PARENT_PROCESS = -1;
         const int STD_OUTPUT_HANDLE = -11;
 
-        /// Only the WINDOWS SUBSYSTEM build (idlegpuw.exe) needs this, and only for
+        /// Only the WINDOWS SUBSYSTEM build (offpeakw.exe) needs this, and only for
         /// the diagnostic modes somebody might run it in by hand. The console build
-        /// (idlegpu.exe) already has a console and takes the early return below.
+        /// (offpeak.exe) already has a console and takes the early return below.
         ///
         /// WHY THERE ARE TWO BINARIES AT ALL. A single winexe was tried and is
         /// unusable from a shell: a Windows-subsystem process is not waited for,
-        /// so measured over SSH on spring `idlegpu service list` printed nothing,
+        /// so measured over SSH on spring `offpeak service list` printed nothing,
         /// set no exit code, and dumped its output into the middle of the next
         /// command. Redirecting to a file produced zero bytes. AttachConsole does
         /// not fix that, because the problem is that the shell has already returned.
@@ -60,7 +60,7 @@ namespace IdleGpu
                 // AttachConsole then succeeds anyway (there is a console further up
                 // the tree) so the code below replaced that pipe with the console
                 // screen buffer. Every line the client printed went to a buffer
-                // nobody was reading and `idlegpu status | Select-String` returned
+                // nobody was reading and `offpeak status | Select-String` returned
                 // nothing at all, with no error. If a handle is already there, it is
                 // the one the caller wants written to.
                 IntPtr existing = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -108,7 +108,7 @@ namespace IdleGpu
             // ONCE A CLIENT VERB HAS BEEN SEEN, EVERY LATER FLAG IS THE CLIENT'S.
             //
             // MEASURED ON SPRING, and it is the same defect as the comment below
-            // arriving from the other side. `idlegpu --config worker.ini service
+            // arriving from the other side. `offpeak --config worker.ini service
             // remove chatterbox --purge` used to read --purge as an AGENT MODE,
             // because this loop took any -- word whatever came before it. Mode was
             // then not --tray, so the client-verb check below could not fire, no
@@ -134,7 +134,7 @@ namespace IdleGpu
 
             // A CLIENT VERB AFTER THE FLAGS IS STILL A CLIENT VERB.
             //
-            // MEASURED THE HARD WAY, over SSH on a headless machine: `idlegpu
+            // MEASURED THE HARD WAY, over SSH on a headless machine: `offpeak
             // --config worker.ini services` matched none of the modes below, fell
             // through to the tray, and started a NotifyIcon on a desktop nobody
             // was looking at. From the far end that is a command that hangs for
@@ -142,7 +142,7 @@ namespace IdleGpu
             // process in the task list. The verb-first form worked; the order was
             // the whole difference and nothing said so.
             //
-            // Falling through to the tray is right for a bare `idlegpu`. It is
+            // Falling through to the tray is right for a bare `offpeak`. It is
             // never right when a verb was named.
             if (mode == "--tray" && rest.Count > 0 && !rest[0].StartsWith("-"))
             {

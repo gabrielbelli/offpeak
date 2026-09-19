@@ -51,7 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
-import idlegpu_service as svc                                   # noqa: E402
+import offpeak_service as svc                                   # noqa: E402
 
 # 24000 is what both checkpoints produce - they share S3GEN_SR - read from the
 # model at load time below rather than assumed. This constant is only the value
@@ -199,11 +199,11 @@ def service_id(engine):
     the id the CONTROLLER believes it is - then hands back the other engine, and
     the only symptom is audio in the wrong voice at the wrong speed.
 
-    IDLEGPU_SERVICE_ID is set by the agent for every service it launches, so the
+    OFFPEAK_SERVICE_ID is set by the agent for every service it launches, so the
     id can only be wrong if worker.ini is wrong, which is one place instead of
     two. The fallback is for running this by hand outside the agent.
     """
-    from_agent = os.getenv("IDLEGPU_SERVICE_ID", "").strip()
+    from_agent = os.getenv("OFFPEAK_SERVICE_ID", "").strip()
     if from_agent:
         return from_agent
     return "chatterbox" + ENGINES[engine]["id_suffix"]
@@ -330,10 +330,10 @@ class Runtime:
             # faster than four, they just spend more of their time descheduled and
             # thrash more cache on the way.
             #
-            # IDLEGPU_CPU_THREADS is set by the agent from the cap in force. When
+            # OFFPEAK_CPU_THREADS is set by the agent from the cap in force. When
             # it is absent this leaves torch's own default alone, because a
             # controller run by hand on a spare machine should use it.
-            n = os.getenv("IDLEGPU_CPU_THREADS", "").strip()
+            n = os.getenv("OFFPEAK_CPU_THREADS", "").strip()
             if n.isdigit() and int(n) > 0:
                 torch.set_num_threads(int(n))
                 self.threads = int(n)
@@ -358,7 +358,7 @@ class Runtime:
             #
             # THIS COSTS SPEED and that is the intended direction: quality first,
             # and TF32 is available to anyone who wants it back.
-            allow = os.getenv("IDLEGPU_ALLOW_TF32", "0") not in ("0", "false", "no")
+            allow = os.getenv("OFFPEAK_ALLOW_TF32", "0") not in ("0", "false", "no")
             torch.backends.cudnn.allow_tf32 = allow
             torch.backends.cuda.matmul.allow_tf32 = allow
             svc.log("precision", tf32=allow)

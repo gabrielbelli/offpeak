@@ -10,14 +10,14 @@
 # in the standard library that ships inside the zip.
 #
 # What that buys is the thing this service exists for: on a bare Windows machine
-# with no Python at all, `idlegpu service install echo` costs about 25 MB and a few
+# with no Python at all, `offpeak service install echo` costs about 25 MB and a few
 # seconds, and then the whole submit / schedule / run / yield / artefact path can be
 # exercised end to end before anybody downloads six gigabytes of speech model. The
 # expensive part of this system is not the part most likely to be wrong.
 #
 # Everything lands in $Root. Uninstall is deleting it.
 #
-#   idlegpu service install echo
+#   offpeak service install echo
 #
 # or by hand:
 #
@@ -92,7 +92,7 @@ try {
     # THE READY MARKER, AND IT IS THE LAST THING THIS SCRIPT DOES. An install that
     # is interrupted at 80 per cent must read as "not installed" rather than as
     # "installed and broken": the first is fixed by running this again, the second
-    # is a support question. `idlegpu service list` reads exactly this file.
+    # is a support question. `offpeak service list` reads exactly this file.
     Set-Content -Path (Join-Path $Root '.installed') -Encoding UTF8 -Value @"
 service   = echo
 python    = $version

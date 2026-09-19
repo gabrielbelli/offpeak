@@ -18,7 +18,7 @@
 # - not worth stripping now.
 
 [project]
-name = "idlegpu-chatterbox"
+name = "offpeak-chatterbox"
 version = "0.1.0"
 description = "Chatterbox on a GPU, as a child process that can be killed at any moment"
 requires-python = "==3.12.*"

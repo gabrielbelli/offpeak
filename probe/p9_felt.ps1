@@ -21,7 +21,7 @@ if (-not (Test-Path $src)) { throw "$src is missing" }
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
 
-$out = Join-Path ([IO.Path]::GetTempPath()) ("idlegpu-probe9-" + [Guid]::NewGuid().ToString("N"))
+$out = Join-Path ([IO.Path]::GetTempPath()) ("offpeak-probe9-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $out | Out-Null
 try {
     $exe = Join-Path $out "p9_felt.exe"

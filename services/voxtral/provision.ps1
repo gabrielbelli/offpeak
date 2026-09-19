@@ -8,7 +8,7 @@
 # shared tree is a shared venv and a shared venv is impossible here. This gets
 # its own InstallDir and its own everything:
 #
-#   %LOCALAPPDATA%\idlegpu\runtime\voxtral\
+#   %LOCALAPPDATA%\offpeak\runtime\voxtral\
 #     uv.exe          a single ~17 MB binary with no prerequisites of its own
 #     python\         CPython 3.12.14, fetched by uv. Duplicated from the
 #                     chatterbox tree at about 60 MiB against 12 GiB, which is
@@ -19,7 +19,7 @@
 #     models\original\  7.49 GiB of weights, straight from Hugging Face
 #     cache\          uv's wheel cache, reclaimed at the end
 #
-# Uninstall is: delete that directory. `idlegpu service remove voxtral` does it.
+# Uninstall is: delete that directory. `offpeak service remove voxtral` does it.
 #
 # MEASURED COST. The finished tree is about 12.2 GiB. During the install it
 # passes about 16.7 GiB, because uv copies wheels rather than hardlinking on
@@ -49,7 +49,7 @@
 
 [CmdletBinding()]
 param(
-    # Mandatory, and passed in by `idlegpu service install voxtral`. There is no
+    # Mandatory, and passed in by `offpeak service install voxtral`. There is no
     # default on purpose: a provisioning script that guesses where to put twelve
     # gigabytes is one that will put them somewhere the uninstall does not reach.
     [Parameter(Mandatory = $true)]
@@ -126,7 +126,7 @@ try {
 
     # Everything uv does stays inside $Root.
     #
-    # DEFERS TO THE ENVIRONMENT WHEN THERE IS ONE. `idlegpu service install`
+    # DEFERS TO THE ENVIRONMENT WHEN THERE IS ONE. `offpeak service install`
     # sets all of these before launching this script, and sets the SAME values
     # again for the controller at run time (Install.ContainedEnvironment). If
     # this script overrode them, provisioning would put things in one place and
@@ -327,7 +327,7 @@ print("weights in", p)
     # THE READY MARKER, AND IT IS THE LAST THING THIS SCRIPT DOES. Twelve
     # gigabytes is a long download; an install interrupted at eight must read as
     # "not installed" rather than "installed and broken". The first is fixed by
-    # running this again, the second is a support question. `idlegpu service
+    # running this again, the second is a support question. `offpeak service
     # list` reads exactly this file and nothing else.
     #
     # AND IT IS NOT THE ONLY THING THE MARKER STANDS BETWEEN. This controller

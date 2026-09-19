@@ -1,7 +1,7 @@
 // Turning a recorded CSV back into Snapshots.
 //
 // WHY THE FIXTURE FORMAT AND THE CALIBRATION FORMAT ARE THE SAME FORMAT. This
-// reads exactly what `idlegpu.exe --calibrate game.csv 20` writes. That
+// reads exactly what `offpeak.exe --calibrate game.csv 20` writes. That
 // is the whole point: when the user runs the agent through twenty minutes of a
 // real match, the CSV it produces drops straight into tests/fixtures/ and becomes
 // a regression test, with no conversion step and nobody transcribing numbers.
@@ -26,7 +26,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public static class Replay
     {

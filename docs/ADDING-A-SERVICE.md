@@ -42,7 +42,7 @@ Everything else is the agent's job.
 | artefact serving | anything in `done/` streams out of `/result` with a `Content-Length` |
 | content-addressed inputs | `/v1/assets` by sha256, cached once, shared across services |
 | containment | every cache variable pointed inside your service's own directory |
-| disk accounting | `idlegpu service cost` measures your directory |
+| disk accounting | `offpeak service cost` measures your directory |
 
 ## What you write
 
@@ -67,7 +67,7 @@ too.
 
 **`Enabled = false` is not a placeholder.** A shipped section is a service this
 build *knows about*. It downloads nothing and runs nothing until somebody types
-`idlegpu service install sd`. That is what keeps a base install at 426 KB on a
+`offpeak service install sd`. That is what keeps a base install at 426 KB on a
 machine whose owner only ever wanted to lend a GPU for speech.
 
 **`YieldGraceSeconds` is a promise you are making about the owner's frame rate.**
@@ -77,7 +77,7 @@ not your average one, and declare that span in the manifest as `unit_seconds` so
 clients can reason about it.
 
 **`manifest()["id"]` must be the section id, and the way to be sure is to read it
-from `IDLEGPU_SERVICE_ID`.** The agent sets that variable for every service it
+from `OFFPEAK_SERVICE_ID`.** The agent sets that variable for every service it
 launches. Nothing reconciles the two ids: the outer one comes from
 `[service.<id>]` and the manifest is spliced in verbatim under it, on purpose,
 because the manifest is your document. A controller copied to make a second
@@ -88,7 +88,7 @@ variant, with the first one's id left in, publishes
 ```
 
 and every layer is satisfied while anything routing on the manifest id hands back
-the wrong model. `idlegpu service list` reports the disagreement when it can see
+the wrong model. `offpeak service list` reports the disagreement when it can see
 a published manifest, but the fix is to not have a literal there at all.
 
 ### Two services out of one tree
@@ -117,10 +117,10 @@ the processor — and wrong for two different sets of weights.
 Two consequences, and the tooling handles both rather than leaving them to be
 discovered:
 
-* `idlegpu service cost` measures a **directory**, so every sharer reports the
+* `offpeak service cost` measures a **directory**, so every sharer reports the
   whole tree. Each row is true; the sum is not. The total counts a tree once and
   the listing names who shares each one.
-* `idlegpu service remove` on a shared tree clears **only that service's own ready
+* `offpeak service remove` on a shared tree clears **only that service's own ready
   marker** and leaves the directory, because deleting it would take the other
   service's weights, the shared virtual environment and its `python.exe` — and
   leave that service `Enabled = true` pointing at an interpreter that is gone.
@@ -205,7 +205,7 @@ Set-Content -Path (Join-Path $Root '.installed') -Value "service = sd"
 
 ### 3. The controller
 
-Python controllers should use `services/lib/idlegpu_service.py`, which is the
+Python controllers should use `services/lib/offpeak_service.py`, which is the
 directory protocol already written. `services/echo/controller.py` is 105 lines
 including its docstring and is the template:
 
@@ -286,7 +286,7 @@ A two-hour run against a yield that fires in six seconds is survived by
 This is `control: "cli"`. The CLI is first class for exactly this:
 
 ```
-idlegpu submit hashcat -- -m 22000 hash.hc22000 rockyou.txt
+offpeak submit hashcat -- -m 22000 hash.hc22000 rockyou.txt
 ```
 
 Everything after `--` becomes `{"argv": [...]}`, which your controller turns
@@ -322,16 +322,16 @@ process the agent can launch, and that has not come up.
 ## Checking your work
 
 ```
-idlegpu service list                 # is it known?
-idlegpu service install sd           # does provisioning finish and leave a marker?
-idlegpu service cost                 # what did it actually cost?
-idlegpu services                     # did your manifest reach the API?
-idlegpu submit sd --body-file job.json --wait
-idlegpu mode Off                     # does it yield? this is the same code path a game takes
-idlegpu status --json                # last_yield_ms, last_yield_was_kill
-idlegpu mode Auto                    # does the job resume rather than fail?
-idlegpu service remove sd            # is all the disk given back?
-idlegpu service remove sd --purge    # ...and if it shares a tree, is it refused
+offpeak service list                 # is it known?
+offpeak service install sd           # does provisioning finish and leave a marker?
+offpeak service cost                 # what did it actually cost?
+offpeak services                     # did your manifest reach the API?
+offpeak submit sd --body-file job.json --wait
+offpeak mode Off                     # does it yield? this is the same code path a game takes
+offpeak status --json                # last_yield_ms, last_yield_was_kill
+offpeak mode Auto                    # does the job resume rather than fail?
+offpeak service remove sd            # is all the disk given back?
+offpeak service remove sd --purge    # ...and if it shares a tree, is it refused
                                      #    until every sharer is gone?
 ```
 

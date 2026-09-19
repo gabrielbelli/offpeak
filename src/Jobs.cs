@@ -41,7 +41,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public enum JobState { Unknown, Queued, Running, Cancelling, Done, Failed, Cancelled }
 

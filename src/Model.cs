@@ -19,7 +19,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public enum Mode { Auto, AlwaysOn, Off }
 

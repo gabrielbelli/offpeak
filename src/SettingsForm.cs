@@ -27,7 +27,7 @@ using System.Globalization;
 using System.Text;
 using System.Windows.Forms;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public class SettingsForm : Form
     {
@@ -58,7 +58,7 @@ namespace IdleGpu
         {
             _agent = agent;
 
-            Text = "idlegpu: what this machine gives up";
+            Text = "offpeak: what this machine gives up";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;

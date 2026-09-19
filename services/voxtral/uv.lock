@@ -163,7 +163,7 @@ wheels = [
 ]
 
 [[package]]
-name = "idlegpu-voxtral"
+name = "offpeak-voxtral"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

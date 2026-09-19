@@ -1,4 +1,4 @@
-# Build idlegpu.
+# Build offpeak.
 #
 # THIS IS THE WHOLE BUILD. No SDK to install, no NuGet restore, no network access
 # and no build host: csc.exe ships inside Windows itself. Measured present on the
@@ -12,9 +12,9 @@
 # THE OUTPUT IS TWO FILES FROM ONE SET OF SOURCES, and the reason is a defect
 # measured on spring rather than a preference.
 #
-#   idlegpu.exe    console subsystem. The CLI, and the agent in every headless
+#   offpeak.exe    console subsystem. The CLI, and the agent in every headless
 #                  mode. This is the one you type.
-#   idlegpuw.exe   Windows subsystem. The tray, and the only thing autostart
+#   offpeakw.exe   Windows subsystem. The tray, and the only thing autostart
 #                  points at. Identical code; it just has no console.
 #
 # python.exe and pythonw.exe are the same pair for the same reason, which is worth
@@ -22,7 +22,7 @@
 #
 # WHAT GOES WRONG WITH ONE winexe. A Windows-subsystem binary is not waited for by
 # a shell, because the shell has no console to give it. Measured over SSH on
-# spring: `idlegpu service list` printed NOTHING, set no $LASTEXITCODE at all, and
+# spring: `offpeak service list` printed NOTHING, set no $LASTEXITCODE at all, and
 # then dumped its output into the middle of the NEXT command two lines later.
 # Redirecting to a file produced a zero byte file. AttachConsole and reopening the
 # standard handles does not fix it, because the problem is the shell returning
@@ -62,8 +62,8 @@ $refs = @(
 $src = Get-ChildItem (Join-Path $root 'src\*.cs') | ForEach-Object { $_.FullName }
 
 foreach ($build in @(
-    @{ name = 'idlegpu.exe';  target = 'exe' },
-    @{ name = 'idlegpuw.exe'; target = 'winexe' }
+    @{ name = 'offpeak.exe';  target = 'exe' },
+    @{ name = 'offpeakw.exe'; target = 'winexe' }
 )) {
     $out = Join-Path $dist $build.name
     & $csc /nologo "/target:$($build.target)" /platform:x64 /optimize+ /warn:4 `

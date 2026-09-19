@@ -5,7 +5,7 @@
 // submitting a job from a shell has to be as direct as running the tool would
 // have been, and everything after a bare `--` is handed to the service verbatim:
 //
-//     idlegpu submit hashcat -- -m 22000 hash.hc22000 rockyou.txt
+//     offpeak submit hashcat -- -m 22000 hash.hc22000 rockyou.txt
 //
 // becomes the body {"argv":["-m","22000","hash.hc22000","rockyou.txt"]}, which the
 // hashcat controller turns into a hashcat.exe invocation. The runner never learns
@@ -28,7 +28,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public static class Cli
     {
@@ -103,7 +103,7 @@ namespace IdleGpu
 
             var client = new RunnerClient();
             // NEVER cfg.Bind. 0.0.0.0 is where a listener ACCEPTS, not an address
-            // anything can dial, and using it here made `idlegpu health` fail on
+            // anything can dial, and using it here made `offpeak health` fail on
             // exactly the machines that had been opened to a LAN: "IPv4 address
             // 0.0.0.0 ... cannot be used as a target address". A client on this
             // machine wants loopback whatever the listener is bound to; only an
@@ -310,7 +310,7 @@ namespace IdleGpu
                           string body, string bodyFile, string idem, bool wait, int intervalMs,
                           string outFile, string artefact, bool raw)
         {
-            if (pos.Count < 2) { Console.Error.WriteLine("usage: idlegpu submit <service> [--body JSON | --body-file F | -- ARGS...]"); return 2; }
+            if (pos.Count < 2) { Console.Error.WriteLine("usage: offpeak submit <service> [--body JSON | --body-file F | -- ARGS...]"); return 2; }
             string service = pos[1];
             string payload;
             if (!string.IsNullOrEmpty(bodyFile)) payload = File.ReadAllText(bodyFile).Trim();
@@ -342,8 +342,8 @@ namespace IdleGpu
                 Console.Error.WriteLine();
                 Console.Error.WriteLine("PowerShell strips double quotes when it passes an argument to a");
                 Console.Error.WriteLine("native program, which is almost always the cause. Either:");
-                Console.Error.WriteLine("  idlegpu submit " + service + " --body-file job.json");
-                Console.Error.WriteLine("  idlegpu submit " + service + " --body '{\"text\":\"hello\"}'");
+                Console.Error.WriteLine("  offpeak submit " + service + " --body-file job.json");
+                Console.Error.WriteLine("  offpeak submit " + service + " --body '{\"text\":\"hello\"}'");
                 return 2;
             }
 
@@ -364,7 +364,7 @@ namespace IdleGpu
 
         static int Job(RunnerClient c, List<string> pos, bool raw)
         {
-            if (pos.Count < 3) { Console.Error.WriteLine("usage: idlegpu job <service> <job-id>"); return 2; }
+            if (pos.Count < 3) { Console.Error.WriteLine("usage: offpeak job <service> <job-id>"); return 2; }
             Response r = c.Send("GET", "/v1/services/" + pos[1] + "/jobs/" + pos[2], null, null, null);
             Console.WriteLine(r.Text.TrimEnd());
             return r.Ok ? 0 : 1;
@@ -378,7 +378,7 @@ namespace IdleGpu
         /// polling a cheap endpoint answers the same question.
         static int Watch(RunnerClient c, List<string> pos, int intervalMs, bool raw)
         {
-            if (pos.Count < 3) { Console.Error.WriteLine("usage: idlegpu watch <service> <job-id>"); return 2; }
+            if (pos.Count < 3) { Console.Error.WriteLine("usage: offpeak watch <service> <job-id>"); return 2; }
             return PollUntilDone(c, pos[1], pos[2], intervalMs, raw);
         }
 
@@ -403,7 +403,7 @@ namespace IdleGpu
 
         static int Result(RunnerClient c, List<string> pos, string outFile, string artefact)
         {
-            if (pos.Count < 3) { Console.Error.WriteLine("usage: idlegpu result <service> <job-id> -o FILE"); return 2; }
+            if (pos.Count < 3) { Console.Error.WriteLine("usage: offpeak result <service> <job-id> -o FILE"); return 2; }
             if (string.IsNullOrEmpty(outFile)) { Console.Error.WriteLine("-o FILE is required"); return 2; }
             return Fetch(c, pos[1], pos[2], outFile, artefact);
         }
@@ -422,7 +422,7 @@ namespace IdleGpu
 
         static int Cancel(RunnerClient c, List<string> pos, bool raw)
         {
-            if (pos.Count < 3) { Console.Error.WriteLine("usage: idlegpu cancel <service> <job-id>"); return 2; }
+            if (pos.Count < 3) { Console.Error.WriteLine("usage: offpeak cancel <service> <job-id>"); return 2; }
             Response r = c.Send("DELETE", "/v1/services/" + pos[1] + "/jobs/" + pos[2], null, null, null);
             Console.WriteLine(r.Text.TrimEnd());
             return r.Ok ? 0 : 1;
@@ -440,7 +440,7 @@ namespace IdleGpu
         {
             if (pos.Count < 2)
             {
-                Console.Error.WriteLine("usage: idlegpu profile generous|balanced|away|<saved id>");
+                Console.Error.WriteLine("usage: offpeak profile generous|balanced|away|<saved id>");
                 Console.Error.WriteLine("  generous  use it unless I am actually gaming");
                 Console.Error.WriteLine("  balanced  use it while I am away, and stay out of my way when I am here");
                 Console.Error.WriteLine("  away      never while I am signed in and unlocked");
@@ -460,7 +460,7 @@ namespace IdleGpu
             if (pos.Count < 2)
             {
                 Console.Error.WriteLine(
-                    "usage: idlegpu limits <state> [cpupct=N] [priority=normal|belownormal|idle]");
+                    "usage: offpeak limits <state> [cpupct=N] [priority=normal|belownormal|idle]");
                 Console.Error.WriteLine(
                     "                        [gpu=yes|no] [workingsetmib=N] [minfreemib=N] [admit=yes|no]");
                 Console.Error.WriteLine("  states: nobodyhome locked idle lightuse busy");
@@ -499,7 +499,7 @@ namespace IdleGpu
 
         static int SetMode(RunnerClient c, List<string> pos, bool raw)
         {
-            if (pos.Count < 2) { Console.Error.WriteLine("usage: idlegpu mode Auto|AlwaysOn|Off"); return 2; }
+            if (pos.Count < 2) { Console.Error.WriteLine("usage: offpeak mode Auto|AlwaysOn|Off"); return 2; }
             byte[] b = new UTF8Encoding(false).GetBytes(
                 Json.Obj(Json.P("mode", Json.Esc(pos[1]))));
             Response r = c.Send("POST", "/v1/mode", b, "application/json", null);
@@ -534,7 +534,7 @@ namespace IdleGpu
                 Console.WriteLine(r.Status == 200 ? "present" : "absent");
                 return r.Status == 200 ? 0 : 1;
             }
-            Console.Error.WriteLine("usage: idlegpu asset put <file> | idlegpu asset has <sha256>");
+            Console.Error.WriteLine("usage: offpeak asset put <file> | offpeak asset has <sha256>");
             return 2;
         }
 
@@ -547,7 +547,7 @@ namespace IdleGpu
 
             if (pos.Count < 3)
             {
-                Console.Error.WriteLine("usage: idlegpu service " + what + " <id>");
+                Console.Error.WriteLine("usage: offpeak service " + what + " <id>");
                 return 2;
             }
             string id = pos[2];
@@ -571,7 +571,7 @@ namespace IdleGpu
                 case "disable": return ServiceEnable(d, cfg, false);
                 case "remove": return ServiceRemove(d, cfg, purge);
                 default:
-                    Console.Error.WriteLine("unknown: idlegpu service " + what);
+                    Console.Error.WriteLine("unknown: offpeak service " + what);
                     Console.Error.WriteLine("try: list, cost, install, enable, disable, remove");
                     return 2;
             }
@@ -590,7 +590,7 @@ namespace IdleGpu
             {
                 Console.WriteLine("no services are configured.");
                 Console.WriteLine("worker.ini.example ships sections for the ones this build knows about;");
-                Console.WriteLine("copy the one you want into worker.ini and run: idlegpu service install <id>");
+                Console.WriteLine("copy the one you want into worker.ini and run: offpeak service install <id>");
                 return 0;
             }
 
@@ -665,7 +665,7 @@ namespace IdleGpu
                 Console.WriteLine("installed = provisioned, real disk committed, but not opted in");
                 Console.WriteLine("ready     = installed and enabled; the scheduler will run it when the GPU is free");
                 Console.WriteLine();
-                Console.WriteLine("`idlegpu service cost` measures what each one is actually using.");
+                Console.WriteLine("`offpeak service cost` measures what each one is actually using.");
             }
             return 0;
         }
@@ -702,7 +702,7 @@ namespace IdleGpu
             if (on && !Install.IsInstalled(d))
             {
                 Console.Error.WriteLine(d.Id + " is not installed, so enabling it would do nothing.");
-                Console.Error.WriteLine("run: idlegpu service install " + d.Id);
+                Console.Error.WriteLine("run: offpeak service install " + d.Id);
                 if (!string.IsNullOrEmpty(d.SizeHint))
                     Console.Error.WriteLine("that will download " + d.SizeHint);
                 return 1;
@@ -717,7 +717,7 @@ namespace IdleGpu
             Console.WriteLine(d.Id + " is now " + (on ? "enabled" : "disabled") + " in " + cfg.ConfigPath);
             // The agent reads worker.ini once, at start, so a mode written here is a
             // mode that takes effect next time. Saying so beats leaving somebody to
-            // wonder why `idlegpu services` still disagrees with what they just did.
+            // wonder why `offpeak services` still disagrees with what they just did.
             Console.WriteLine("restart the agent for this to take effect.");
             return 0;
         }
@@ -747,45 +747,45 @@ namespace IdleGpu
             string e2;
             Install.SetEnabled(cfg.ConfigPath, d.Id, false, out e2);
             Console.WriteLine(d.Id + " is now disabled; its [service." + d.Id + "] section is still in worker.ini,");
-            Console.WriteLine("so `idlegpu service install " + d.Id + "` puts it back.");
+            Console.WriteLine("so `offpeak service install " + d.Id + "` puts it back.");
             return 0;
         }
 
         public static void Usage()
         {
-            Console.WriteLine("idlegpu - lend a gaming PC's GPU to whatever you like, and give it straight back");
+            Console.WriteLine("offpeak - lend a gaming PC's GPU to whatever you like, and give it straight back");
             Console.WriteLine();
             Console.WriteLine("agent:");
-            Console.WriteLine("  idlegpu --tray                     the agent with a tray icon (default)");
-            Console.WriteLine("  idlegpu --serve                    the agent headless, with the listener");
-            Console.WriteLine("  idlegpu --once                     one JSON snapshot of the signals, then exit");
-            Console.WriteLine("  idlegpu --watch [seconds]          one line per second, then exit");
-            Console.WriteLine("  idlegpu --calibrate [csv] [mins]   record every signal to a CSV, then exit");
-            Console.WriteLine("  idlegpu --config <path>            settings file (default worker.ini beside the exe)");
+            Console.WriteLine("  offpeak --tray                     the agent with a tray icon (default)");
+            Console.WriteLine("  offpeak --serve                    the agent headless, with the listener");
+            Console.WriteLine("  offpeak --once                     one JSON snapshot of the signals, then exit");
+            Console.WriteLine("  offpeak --watch [seconds]          one line per second, then exit");
+            Console.WriteLine("  offpeak --calibrate [csv] [mins]   record every signal to a CSV, then exit");
+            Console.WriteLine("  offpeak --config <path>            settings file (default worker.ini beside the exe)");
             Console.WriteLine();
             Console.WriteLine("services (local; nothing is downloaded until you ask):");
-            Console.WriteLine("  idlegpu service list               known / installed / ready, and what each would cost");
-            Console.WriteLine("  idlegpu service cost               measure what each one is using on this disk");
-            Console.WriteLine("  idlegpu service install <id>       fetch it into the contained directory, then enable it");
-            Console.WriteLine("  idlegpu service disable <id>       stop running it; keep it on disk");
-            Console.WriteLine("  idlegpu service remove <id>        delete it and reclaim the disk");
-            Console.WriteLine("  idlegpu service remove <id> --purge  also delete a tree shared with another service");
+            Console.WriteLine("  offpeak service list               known / installed / ready, and what each would cost");
+            Console.WriteLine("  offpeak service cost               measure what each one is using on this disk");
+            Console.WriteLine("  offpeak service install <id>       fetch it into the contained directory, then enable it");
+            Console.WriteLine("  offpeak service disable <id>       stop running it; keep it on disk");
+            Console.WriteLine("  offpeak service remove <id>        delete it and reclaim the disk");
+            Console.WriteLine("  offpeak service remove <id> --purge  also delete a tree shared with another service");
             Console.WriteLine();
             Console.WriteLine("client:");
-            Console.WriteLine("  idlegpu status                     what the runner thinks is going on");
-            Console.WriteLine("  idlegpu services                   what it can do, from each controller's manifest");
-            Console.WriteLine("  idlegpu submit <svc> [--body JSON | --body-file F | -- ARGS...]");
+            Console.WriteLine("  offpeak status                     what the runner thinks is going on");
+            Console.WriteLine("  offpeak services                   what it can do, from each controller's manifest");
+            Console.WriteLine("  offpeak submit <svc> [--body JSON | --body-file F | -- ARGS...]");
             Console.WriteLine("                                     [--idempotency-key K] [--wait] [-o FILE]");
-            Console.WriteLine("  idlegpu job <svc> <job>            one job's status");
-            Console.WriteLine("  idlegpu watch <svc> <job>          poll until it finishes");
-            Console.WriteLine("  idlegpu result <svc> <job> -o F    stream an artefact out [--artefact NAME]");
-            Console.WriteLine("  idlegpu cancel <svc> <job>         withdraw it, or ask the controller to stop");
-            Console.WriteLine("  idlegpu mode Auto|AlwaysOn|Off     change the mode");
-            Console.WriteLine("  idlegpu profile <name>             generous | balanced | away | <saved id>");
-            Console.WriteLine("  idlegpu limits <state> [k=v ...]   one row: cpupct, priority, gpu,");
+            Console.WriteLine("  offpeak job <svc> <job>            one job's status");
+            Console.WriteLine("  offpeak watch <svc> <job>          poll until it finishes");
+            Console.WriteLine("  offpeak result <svc> <job> -o F    stream an artefact out [--artefact NAME]");
+            Console.WriteLine("  offpeak cancel <svc> <job>         withdraw it, or ask the controller to stop");
+            Console.WriteLine("  offpeak mode Auto|AlwaysOn|Off     change the mode");
+            Console.WriteLine("  offpeak profile <name>             generous | balanced | away | <saved id>");
+            Console.WriteLine("  offpeak limits <state> [k=v ...]   one row: cpupct, priority, gpu,");
             Console.WriteLine("                                     workingsetmib, minfreemib, admit");
-            Console.WriteLine("  idlegpu asset put <file>           store a blob, print its sha256");
-            Console.WriteLine("  idlegpu fingerprint                the certificate digest every client pins");
+            Console.WriteLine("  offpeak asset put <file>           store a blob, print its sha256");
+            Console.WriteLine("  offpeak fingerprint                the certificate digest every client pins");
             Console.WriteLine();
             Console.WriteLine("connecting to another machine:");
             Console.WriteLine("  --host H --port N --fingerprint SHA256 --key-file F");

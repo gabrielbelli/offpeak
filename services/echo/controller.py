@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
-import idlegpu_service as svc                                   # noqa: E402
+import offpeak_service as svc                                   # noqa: E402
 
 # The capability advertisement. The agent serves this verbatim at
 # GET /v1/services and never inspects it, so the vocabulary is for clients:

@@ -27,7 +27,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     static class SharedTreeTests
     {
@@ -73,7 +73,7 @@ namespace IdleGpu
 
         static string TempDir()
         {
-            string d = Path.Combine(Path.GetTempPath(), "idlegpu-s-" + Guid.NewGuid().ToString("N"));
+            string d = Path.Combine(Path.GetTempPath(), "offpeak-s-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(d);
             return d;
         }

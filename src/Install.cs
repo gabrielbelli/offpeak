@@ -10,7 +10,7 @@
 // service declares what it needs (ServiceDef.Provision), where it goes
 // (InstallDir), how it proves it finished (ReadyMarker) and roughly what it will
 // cost before you commit (SizeHint). Nothing in the agent runs Provision. The
-// only thing that ever does is a person typing `idlegpu service install <id>`.
+// only thing that ever does is a person typing `offpeak service install <id>`.
 //
 // THREE STATES, NEVER CONFLATED. This is the distinction the API exists to make,
 // and it matters because two of these are the owner's to fix and one is not:
@@ -18,7 +18,7 @@
 //   KNOWN      this build has a [service.<id>] section for it. It costs nothing,
 //              it has downloaded nothing, and it will not run. Fixable: install it.
 //   INSTALLED  provisioning finished and left its ReadyMarker. Real disk is now
-//              committed and `idlegpu service cost` will say how much.
+//              committed and `offpeak service cost` will say how much.
 //   READY      installed AND enabled AND registered with the agent, so the
 //              scheduler will launch it the moment the policy allows.
 //
@@ -38,7 +38,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     /// What is true about one service right now.
     public class ServiceStatus
@@ -241,7 +241,7 @@ namespace IdleGpu
         ///
         /// Installed, the scripts are at ScriptsRoot inside the contained directory.
         /// In a checkout, the exe is in dist\ and the scripts are in services\ one
-        /// level up. Trying both means `build.ps1` then `dist\idlegpu.exe service
+        /// level up. Trying both means `build.ps1` then `dist\offpeak.exe service
         /// install echo` works without an install step, which is what somebody
         /// evaluating this repository will type first.
         public static string ResolveScript(string relative, string scriptsRoot)
@@ -283,9 +283,9 @@ namespace IdleGpu
             var e = new Dictionary<string, string>();
             string root = s.InstallDir;
             string cache = Path.Combine(root, "cache");
-            e["IDLEGPU_SERVICE_ROOT"] = root;
-            e["IDLEGPU_SERVICE_ID"] = s.Id;
-            e["IDLEGPU_QUEUE_DIR"] = s.QueueDir;
+            e["OFFPEAK_SERVICE_ROOT"] = root;
+            e["OFFPEAK_SERVICE_ID"] = s.Id;
+            e["OFFPEAK_QUEUE_DIR"] = s.QueueDir;
             e["HF_HOME"] = Path.Combine(root, "models", "hf");
             e["HUGGINGFACE_HUB_CACHE"] = Path.Combine(root, "models", "hf", "hub");
             // HF_HUB_CACHE is the CURRENT name; HUGGINGFACE_HUB_CACHE above is the
@@ -436,7 +436,7 @@ namespace IdleGpu
                 sb.Append("environment and its interpreter with it.");
                 sb.Append(Environment.NewLine);
                 sb.Append("To reclaim the disk, remove every service that shares the tree ");
-                sb.Append("and then: idlegpu service remove " + s.Id + " --purge");
+                sb.Append("and then: offpeak service remove " + s.Id + " --purge");
                 note = sb.ToString();
                 return true;
             }
@@ -453,7 +453,7 @@ namespace IdleGpu
                             (stillThere.Count == 1 ? " is still installed there." : " are still installed there.") +
                             Environment.NewLine +
                             "Remove " + (stillThere.Count == 1 ? "it" : "them") + " first: " +
-                            "idlegpu service remove " + stillThere[0];
+                            "offpeak service remove " + stillThere[0];
                     return false;
                 }
             }
@@ -533,7 +533,7 @@ namespace IdleGpu
             // Json.PeekString already reads one top level key out of a document
             // without parsing it, skipping anything nested. That is exactly this
             // job, so there is no second reader here to drift from it.
-            string got = IdleGpu.Json.PeekString(manifestJson, "id");
+            string got = OffPeak.Json.PeekString(manifestJson, "id");
             if (string.IsNullOrEmpty(got)) return null;
             if (string.Equals(got, d.Id, StringComparison.Ordinal)) return null;
             return "WARNING: " + d.Id + " publishes a manifest that calls itself '" + got +
@@ -613,7 +613,7 @@ namespace IdleGpu
         /// "installed" means.
         /// Without an agent there is nobody to ask whether the machine is free
         /// right now, so `available` is published as null rather than as false.
-        /// `idlegpu service list` runs in a separate process from the agent and
+        /// `offpeak service list` runs in a separate process from the agent and
         /// used to have no way to say "I do not know"; false would have read as
         /// "busy" to anything parsing it.
         public static string Json(ServiceDef d, ServiceStatus st, bool running, int queued,
@@ -629,40 +629,40 @@ namespace IdleGpu
         {
             var sb = new StringBuilder();
             sb.Append("{");
-            sb.Append(IdleGpu.Json.P("id", IdleGpu.Json.Esc(d.Id))).Append(",");
-            sb.Append(IdleGpu.Json.P("description", IdleGpu.Json.Esc(d.Description))).Append(",");
-            sb.Append(IdleGpu.Json.P("priority", IdleGpu.Json.Num(d.Priority))).Append(",");
-            sb.Append(IdleGpu.Json.P("labels",
+            sb.Append(OffPeak.Json.P("id", OffPeak.Json.Esc(d.Id))).Append(",");
+            sb.Append(OffPeak.Json.P("description", OffPeak.Json.Esc(d.Description))).Append(",");
+            sb.Append(OffPeak.Json.P("priority", OffPeak.Json.Num(d.Priority))).Append(",");
+            sb.Append(OffPeak.Json.P("labels",
                 "[" + Join(d.Labels) + "]")).Append(",");
-            sb.Append(IdleGpu.Json.P("yield_grace_seconds", IdleGpu.Json.Num(graceSeconds))).Append(",");
+            sb.Append(OffPeak.Json.P("yield_grace_seconds", OffPeak.Json.Num(graceSeconds))).Append(",");
 
             // The three states, spelled out separately and never merged. A client
             // that only understands one of them still gets a true answer from it.
-            sb.Append(IdleGpu.Json.P("known", "true")).Append(",");
-            sb.Append(IdleGpu.Json.P("installed", st.Installed ? "true" : "false")).Append(",");
-            sb.Append(IdleGpu.Json.P("enabled", st.Enabled ? "true" : "false")).Append(",");
-            sb.Append(IdleGpu.Json.P("ready", (st.Installed && st.Enabled) ? "true" : "false")).Append(",");
-            sb.Append(IdleGpu.Json.P("not_ready_reason",
-                st.NotReadyReason == null ? "null" : IdleGpu.Json.Esc(st.NotReadyReason))).Append(",");
+            sb.Append(OffPeak.Json.P("known", "true")).Append(",");
+            sb.Append(OffPeak.Json.P("installed", st.Installed ? "true" : "false")).Append(",");
+            sb.Append(OffPeak.Json.P("enabled", st.Enabled ? "true" : "false")).Append(",");
+            sb.Append(OffPeak.Json.P("ready", (st.Installed && st.Enabled) ? "true" : "false")).Append(",");
+            sb.Append(OffPeak.Json.P("not_ready_reason",
+                st.NotReadyReason == null ? "null" : OffPeak.Json.Esc(st.NotReadyReason))).Append(",");
 
-            sb.Append(IdleGpu.Json.P("needs_provisioning", st.NeedsNoProvisioning ? "false" : "true")).Append(",");
-            sb.Append(IdleGpu.Json.P("size_hint",
-                string.IsNullOrEmpty(d.SizeHint) ? "null" : IdleGpu.Json.Esc(d.SizeHint))).Append(",");
-            sb.Append(IdleGpu.Json.P("disk_bytes",
+            sb.Append(OffPeak.Json.P("needs_provisioning", st.NeedsNoProvisioning ? "false" : "true")).Append(",");
+            sb.Append(OffPeak.Json.P("size_hint",
+                string.IsNullOrEmpty(d.SizeHint) ? "null" : OffPeak.Json.Esc(d.SizeHint))).Append(",");
+            sb.Append(OffPeak.Json.P("disk_bytes",
                 st.DiskBytes < 0 ? "null" : st.DiskBytes.ToString(CultureInfo.InvariantCulture))).Append(",");
 
-            sb.Append(IdleGpu.Json.P("running", running ? "true" : "false")).Append(",");
-            sb.Append(IdleGpu.Json.P("queued", IdleGpu.Json.Num(queued))).Append(",");
+            sb.Append(OffPeak.Json.P("running", running ? "true" : "false")).Append(",");
+            sb.Append(OffPeak.Json.P("queued", OffPeak.Json.Num(queued))).Append(",");
             // WHICH RESOURCE, AND WILL IT RUN NOW. `device` is what this service
             // is after; `available` is this machine's answer for it, already
             // resolved against the right gate. A client should read `available`
             // and never try to work it out from gpu_available and a device name,
             // because that is the calculation this runner exists to do for them.
-            sb.Append(IdleGpu.Json.P("device", IdleGpu.Json.Esc(device))).Append(",");
-            sb.Append(IdleGpu.Json.P("available",
+            sb.Append(OffPeak.Json.P("device", OffPeak.Json.Esc(device))).Append(",");
+            sb.Append(OffPeak.Json.P("available",
                 available.HasValue ? (available.Value ? "true" : "false") : "null")).Append(",");
-            sb.Append(IdleGpu.Json.P("unavailable_reason",
-                string.IsNullOrEmpty(unavailableReason) ? "null" : IdleGpu.Json.Esc(unavailableReason))).Append(",");
+            sb.Append(OffPeak.Json.P("unavailable_reason",
+                string.IsNullOrEmpty(unavailableReason) ? "null" : OffPeak.Json.Esc(unavailableReason))).Append(",");
             sb.Append("\"manifest\":").Append(manifest == null ? "null" : manifest);
             sb.Append("}");
             return sb.ToString();
@@ -675,7 +675,7 @@ namespace IdleGpu
             for (int i = 0; i < items.Length; i++)
             {
                 if (i > 0) sb.Append(",");
-                sb.Append(IdleGpu.Json.Esc(items[i]));
+                sb.Append(OffPeak.Json.Esc(items[i]));
             }
             return sb.ToString();
         }

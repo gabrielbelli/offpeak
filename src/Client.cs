@@ -26,7 +26,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
-namespace IdleGpu
+namespace OffPeak
 {
     public class Response
     {
@@ -69,7 +69,7 @@ namespace IdleGpu
             string want = NormalisePin(Pin);
             if (want.Length != 64)
                 throw new InvalidOperationException(
-                    "no certificate fingerprint to pin. Run `idlegpu fingerprint` on the runner's own machine, " +
+                    "no certificate fingerprint to pin. Run `offpeak fingerprint` on the runner's own machine, " +
                     "then pass --fingerprint or set CertFingerprint in worker.ini. " +
                     "Verification is never disabled to work around this.");
 
@@ -108,7 +108,7 @@ namespace IdleGpu
                     head.Append(method).Append(' ').Append(target).Append(" HTTP/1.1\r\n");
                     head.Append("Host: ").Append(Host).Append(':')
                         .Append(Port.ToString(CultureInfo.InvariantCulture)).Append("\r\n");
-                    head.Append("User-Agent: idlegpu-cli\r\n");
+                    head.Append("User-Agent: offpeak-cli\r\n");
                     head.Append("Accept: application/json\r\n");
                     head.Append("Connection: close\r\n");
                     if (!string.IsNullOrEmpty(ApiKey))

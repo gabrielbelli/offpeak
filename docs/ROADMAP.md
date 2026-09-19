@@ -18,7 +18,7 @@ The install on the gaming PC would be nearly empty. Instead of six gigabytes of
 torch and speech weights on somebody's games drive, the GPU would be published
 over the network and the *client* machine would hold the models and the Python
 environment. The runner would shrink to the policy engine, the listener and a
-GPU-over-IP daemon. `idlegpu service install chatterbox` would download nothing.
+GPU-over-IP daemon. `offpeak service install chatterbox` would download nothing.
 
 That is a genuinely attractive shape for this project, because the single
 biggest imposition it makes on a volunteered machine is disk.
