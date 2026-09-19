@@ -45,6 +45,7 @@ offpeak limits                      # what this machine is giving up right now
 - [The API](#the-api)
 - [TLS, and why there is no certificate authority](#tls-and-why-there-is-no-certificate-authority)
 - [Exposing it to a LAN, and the one admin click](#exposing-it-to-a-lan-and-the-one-admin-click)
+- [Who uses this](#who-uses-this)
 - [Adding a service](#adding-a-service)
 - [How yielding works, measured](#how-yielding-works-measured)
 - [Containment, and the four things outside the folder](#containment-and-the-four-things-outside-the-folder)
@@ -681,6 +682,22 @@ run tokenless, the way BOINC's GUI RPC does, because reaching `127.0.0.1` alread
 means code execution on the machine.
 
 ---
+
+## Who uses this
+
+[Calliope](https://github.com/gabrielbelli/calliope) is a self-hosted speech
+stack that runs on a NAS with no GPU. Its long-form voice cloning needs one,
+so it borrows this machine's: the `chatterbox` and `chatterbox-turbo` services
+in `worker.ini` are what it submits to.
+
+It is a fair test of the promise, because the two sides want opposite things.
+Calliope wants the card; the person at the keyboard wants to play a game. The
+runner answers `can_run` before every job and yields mid-job when the answer
+changes, so a long document being read aloud pauses rather than competing, and
+the stack reports the pause instead of failing the job.
+
+Nothing about that is specific to speech. The runner never parses a job, never
+opens an artefact, and has no word for audio.
 
 ## Adding a service
 
